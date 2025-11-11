@@ -8,12 +8,79 @@ Home Lab Server Manager - A Flask web application for managing physical servers 
 
 ## Development Environment Setup
 
-### Prerequisites
+### Docker Deployment (Recommended)
+
+#### Prerequisites
+- Docker
+- Docker Compose
+
+#### Quick Start
+```bash
+# Build and start the container
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the container
+docker-compose down
+```
+
+The application runs on `http://localhost:5000`
+
+#### Docker Configuration
+
+**Dockerfile**:
+- Base image: `python:3.11-alpine`
+- Includes `ipmitool` for IPMI management
+- Build dependencies for Python packages (gcc, musl-dev, linux-headers)
+- Exposes port 5000
+
+**Volumes**:
+- `./instance:/app/instance` - Persists SQLite database between container restarts
+
+**Environment Variables**:
+- `FLASK_SECRET_KEY` - Override default SECRET_KEY (recommended for production)
+- `FLASK_ENV` - Set to `production` or `development`
+
+#### Production Deployment
+```bash
+# Set a secure SECRET_KEY via environment variable
+export FLASK_SECRET_KEY="your-secure-random-key-here"
+
+# Start in production mode
+docker-compose up -d
+
+# Or use inline environment variable
+FLASK_SECRET_KEY="your-key" docker-compose up -d
+```
+
+#### Docker Commands
+```bash
+# Rebuild container after code changes
+docker-compose up -d --build
+
+# Access container shell
+docker-compose exec lab-manager sh
+
+# View real-time logs
+docker-compose logs -f lab-manager
+
+# Restart container
+docker-compose restart
+
+# Remove container and volumes
+docker-compose down -v
+```
+
+### Local Development (Without Docker)
+
+#### Prerequisites
 - Python 3.x
 - `ipmitool` command-line utility (for IPMI server management)
 - Virtual environment located at `.venv/`
 
-### Initial Setup
+#### Initial Setup
 ```bash
 # Activate virtual environment
 source .venv/bin/activate
