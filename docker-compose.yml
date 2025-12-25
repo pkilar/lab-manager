@@ -4,10 +4,15 @@ services:
     container_name: lab-manager
     network_mode: host
     volumes:
-      # Persist SQLite database
+      # Persist SQLite database and encryption key
       - ./instance:/app/instance
     environment:
-      # Override default SECRET_KEY for production
-      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-this-secret-key-in-production}
+      # IMPORTANT: Set these in production!
+      # Generate SECRET_KEY with: python -c "import secrets; print(secrets.token_hex(32))"
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:?Set FLASK_SECRET_KEY environment variable}
+      # Generate ENCRYPTION_KEY with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      # NOTE: If not set, a key will be auto-generated and saved to instance/.encryption_key
+      - FLASK_ENCRYPTION_KEY=${FLASK_ENCRYPTION_KEY:-}
       - FLASK_ENV=${FLASK_ENV:-production}
+      - FLASK_DEBUG=${FLASK_DEBUG:-false}
     restart: unless-stopped

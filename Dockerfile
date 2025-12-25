@@ -1,5 +1,5 @@
-# Use Alpine Linux with Python 3.14
-FROM python:3.14-alpine
+# Use Alpine Linux with Python 3.11 (stable LTS)
+FROM python:3.11-alpine
 
 # Set working directory
 WORKDIR /app
