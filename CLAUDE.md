@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Home Lab Server Manager - A Flask web application for managing physical servers via IPMI and Redfish protocols. The application provides a web interface to control server power states (on/off/restart) and monitor server status.
+Home Lab Server Manager - A Flask web application for managing physical servers via IPMI, Redfish, and Wake-on-LAN protocols. The application provides a web interface to control server power states (on/off/restart) and monitor server status.
 
 ## Development Environment Setup
 
@@ -35,6 +35,11 @@ The application runs on `http://localhost:5000`
 - Includes `ipmitool` for IPMI management
 - Build dependencies for Python packages (gcc, musl-dev, linux-headers)
 - Exposes port 5000
+
+**Network Configuration**:
+- Uses `network_mode: host` to enable Wake-on-LAN functionality
+- Container shares host's network stack (required for WOL broadcast packets)
+- Application accessible on host's port 5000 (no port remapping)
 
 **Volumes**:
 - `./instance:/app/instance` - Persists SQLite database between container restarts
@@ -108,11 +113,12 @@ Currently, there is no test suite configured for this project.
 ### Database Models
 
 **Server Model** (`Server`):
-- Stores server configuration including name, IP address, credentials
+- Stores server configuration including name, IP address, credentials, and MAC address
 - Tracks power status and last update timestamp
-- Supports both Redfish and IPMI authentication methods
+- Supports Redfish, IPMI, and Wake-on-LAN authentication methods
 - `check_power_status()`: Queries actual server power state via API/IPMI
 - Credentials stored in plain text (security consideration)
+- MAC address field enables Wake-on-LAN for power on operations
 
 **User Model** (`User`):
 - Basic authentication with username/password
@@ -121,16 +127,18 @@ Currently, there is no test suite configured for this project.
 
 ### Key Architectural Patterns
 
-**Dual Protocol Support**:
-- Application checks for Redfish credentials first (`redfish_user`), falls back to IPMI (`ipmi_user`)
+**Multi-Protocol Support**:
+- Application checks for Redfish credentials first (`redfish_user`), then IPMI (`ipmi_user`), and finally Wake-on-LAN (`mac_address`)
 - Redfish: REST API calls to `https://{ip}/redfish/v1/` using requests library
 - IPMI: Command-line execution via subprocess running `ipmitool`
+- Wake-on-LAN: Network magic packet sent via `wakeonlan` library (power on only)
 
 **Power Management Flow**:
 1. `send_power_command()` orchestrates the command dispatch
 2. Checks current status via `check_power_status()` before sending commands
-3. Routes to either `redfish_command()` or `ipmi_command()` based on available credentials
-4. Updates database status after successful operations
+3. Routes to `redfish_command()`, `ipmi_command()`, or `wol_command()` based on available credentials
+4. Wake-on-LAN used as fallback for power on when no IPMI/Redfish credentials configured
+5. Updates database status after successful operations
 
 **Route Architecture**:
 - Web UI routes: `/`, `/server/new`, `/server/<id>/edit`, `/server/<id>/power/<action>`
@@ -150,6 +158,13 @@ Currently, there is no test suite configured for this project.
 - Note: Line 76 has incorrect command format (`"power status"` should be split into separate arguments)
 - 30-second timeout on all subprocess calls
 
+**Wake-on-LAN Specifics**:
+- Uses `wakeonlan` Python library to send magic packets
+- Only supports power on operations (cannot turn off or restart servers)
+- Requires MAC address in format: `AA:BB:CC:DD:EE:FF`
+- Used as fallback when no Redfish or IPMI credentials configured
+- Server must have Wake-on-LAN enabled in BIOS/UEFI settings
+
 **Database Initialization**:
 - `db.create_all()` runs at application startup within app context
 - Default admin user created via `@app.before_request` hook using `g` object to prevent duplicate creation
@@ -166,12 +181,14 @@ Currently, there is no test suite configured for this project.
 ### Adding a New Server
 Navigate to `/server/new` and provide:
 - Name and IP address (required)
-- Either Redfish OR IPMI credentials (username + password)
+- Either Redfish OR IPMI credentials (username + password) OR MAC address for Wake-on-LAN
+- MAC address enables Wake-on-LAN for power on (useful for servers without management interfaces)
 - Optional notes field
 
 ### Debugging Power Commands
 - Check `subprocess` output for IPMI errors in console logs
 - Redfish responses include status codes (200/204 = success)
+- Wake-on-LAN magic packets sent via UDP (no response expected)
 - Server status updates only on successful commands
 - Print statement at line 60 outputs Redfish system URL for debugging
 
@@ -190,6 +207,12 @@ SELECT * FROM user;
 ### Extending Protocol Support
 To add support for other management protocols:
 1. Add credential fields to `Server` model
-2. Implement command function similar to `ipmi_command()` or `redfish_command()`
+2. Implement command function similar to `ipmi_command()`, `redfish_command()`, or `wol_command()`
 3. Update `send_power_command()` to check for new credentials and route accordingly
 4. Modify templates to include new credential input fields
+5. Update requirements.txt if new dependencies are needed
+
+**Existing Protocols**:
+- Redfish: Full power management (on/off/restart) via REST API
+- IPMI: Full power management via ipmitool command-line utility
+- Wake-on-LAN: Power on only via network magic packets
