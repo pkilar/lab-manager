@@ -24,6 +24,7 @@ env/
 # Git
 .git/
 .gitignore
+.fastembed_cache
 
 # Database (will be mounted as volume)
 instance/
