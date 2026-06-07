@@ -3,3 +3,6 @@
 __pycache__/
 instance/
 .fastembed_cache/
+
+# Local secrets — contains FLASK_SECRET_KEY (do not commit)
+.env
