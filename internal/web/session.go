@@ -9,7 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -114,7 +114,12 @@ type sessionWriter struct {
 	sess    *sessionData
 	secure  bool // set the Secure cookie flag (request arrived over HTTPS)
 	flushed bool
+	wrote   bool // a status line or body has been written
 }
+
+// Unwrap exposes the underlying writer so http.ResponseController can reach any
+// optional interfaces (Flusher, Hijacker, ...) the original writer implements.
+func (w *sessionWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *sessionWriter) flushSession() {
 	if w.flushed {
@@ -126,7 +131,7 @@ func (w *sessionWriter) flushSession() {
 	}
 	payload, err := json.Marshal(w.sess)
 	if err != nil {
-		log.Printf("ERROR: marshal session: %v", err)
+		slog.Error("marshal session", "err", err)
 		return
 	}
 	http.SetCookie(w.ResponseWriter, &http.Cookie{
@@ -140,11 +145,13 @@ func (w *sessionWriter) flushSession() {
 }
 
 func (w *sessionWriter) WriteHeader(code int) {
+	w.wrote = true
 	w.flushSession()
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *sessionWriter) Write(b []byte) (int, error) {
+	w.wrote = true
 	w.flushSession()
 	return w.ResponseWriter.Write(b)
 }
@@ -161,6 +168,17 @@ func (a *App) withSession(next http.Handler) http.Handler {
 		// or via a TLS-terminating proxy like Traefik). The app is also served
 		// over plain HTTP on the LAN, where Secure would drop the cookie.
 		sw := &sessionWriter{ResponseWriter: w, app: a, sess: sess, secure: requestScheme(r) == "https"}
+		// Recover panics from downstream handlers here, where the sessionWriter
+		// (which tracks whether a response was written) is in scope. A leaked
+		// stack trace is never sent to the client.
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("panic recovered in handler", "err", rec, "method", r.Method, "path", r.URL.Path)
+				if !sw.wrote {
+					http.Error(sw, "Internal Server Error", http.StatusInternalServerError)
+				}
+			}
+		}()
 		ctx := context.WithValue(r.Context(), ctxSession, sess)
 		next.ServeHTTP(sw, r.WithContext(ctx))
 	})

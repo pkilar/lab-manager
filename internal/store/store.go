@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -38,17 +38,17 @@ func Open(dbPath string, cipher *secret.Fernet) (*Store, error) {
 	// concurrent requests can't trip "database is locked".
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
 	st := &Store{db: db, cipher: cipher}
 	if err := st.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return st, nil
@@ -101,7 +101,7 @@ func (st *Store) addColumnIfMissing(table, column, definition string) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	found := false
 	for rows.Next() {
@@ -191,7 +191,7 @@ func (st *Store) AllServers() ([]*model.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var servers []*model.Server
 	for rows.Next() {
@@ -346,7 +346,7 @@ func (st *Store) InitDefaultUser() error {
 	if err := st.CreateUser(&model.User{Username: "admin", PasswordHash: hash, PasswordChangeRequired: true}); err != nil {
 		return err
 	}
-	log.Printf("WARNING: default admin user created - please change password immediately!")
+	slog.Warn("default admin user created; change the password immediately")
 	return nil
 }
 

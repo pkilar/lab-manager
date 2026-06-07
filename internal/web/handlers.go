@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,7 +28,7 @@ func pathID(r *http.Request) (int64, bool) {
 }
 
 func (a *App) serverError(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("ERROR: %s %s: %v", r.Method, r.URL.Path, err)
+	slog.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 }
 
@@ -72,6 +72,76 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
+// ---- JSON API response shapes --------------------------------------------
+
+type apiError struct {
+	Error string `json:"error"`
+}
+
+type apiPowerResult struct {
+	Success  bool   `json:"success"`
+	Message  string `json:"message"`
+	ServerID int64  `json:"server_id"`
+	Action   string `json:"action"`
+}
+
+type apiStatusResult struct {
+	Success  bool   `json:"success"`
+	Status   string `json:"status"`
+	ServerID int64  `json:"server_id"`
+}
+
+type consoleLaunchResponse struct {
+	Success      bool   `json:"success"`
+	AutoLoginURL string `json:"auto_login_url"`
+	ServerName   string `json:"server_name"`
+	BMCType      string `json:"bmc_type"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+type consoleErrorResponse struct {
+	Success     bool   `json:"success"`
+	Error       string `json:"error"`
+	FallbackURL string `json:"fallback_url"`
+}
+
+// ---- server form ---------------------------------------------------------
+
+type serverForm struct {
+	Name, IPAddress, MAC, BMCType                        string
+	RedfishUser, RedfishPassword, IPMIUser, IPMIPassword string
+	Notes                                                string
+}
+
+// parseServerForm reads and validates the shared add/edit form. On invalid
+// input it returns a non-empty error message (and does not default the BMC
+// type, which the caller does not use on the error path).
+func parseServerForm(r *http.Request) (serverForm, string) {
+	f := serverForm{
+		Name:            sanitizeServerName(r.PostFormValue("name")),
+		IPAddress:       strings.TrimSpace(r.PostFormValue("ip_address")),
+		MAC:             strings.TrimSpace(r.PostFormValue("mac_address")),
+		BMCType:         r.PostFormValue("bmc_type"),
+		RedfishUser:     r.PostFormValue("redfish_user"),
+		RedfishPassword: r.PostFormValue("redfish_password"),
+		IPMIUser:        r.PostFormValue("ipmi_user"),
+		IPMIPassword:    r.PostFormValue("ipmi_password"),
+		Notes:           r.PostFormValue("notes"),
+	}
+	switch {
+	case f.Name == "":
+		return f, "Server name is required"
+	case !validateIPAddress(f.IPAddress):
+		return f, "Invalid IP address format"
+	case f.MAC != "" && !validateMACAddress(f.MAC):
+		return f, "Invalid MAC address format (use AA:BB:CC:DD:EE:FF)"
+	}
+	if !model.ValidBMCType(f.BMCType) {
+		f.BMCType = model.BMCGeneric
+	}
+	return f, ""
+}
+
 // ---- web UI --------------------------------------------------------------
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -112,38 +182,16 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleNewServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		name := sanitizeServerName(r.PostFormValue("name"))
-		ip := strings.TrimSpace(r.PostFormValue("ip_address"))
-		mac := strings.TrimSpace(r.PostFormValue("mac_address"))
-
-		switch {
-		case name == "":
-			a.flashSimple(w, r, "new_server", "error", "Server name is required")
+		f, errMsg := parseServerForm(r)
+		if errMsg != "" {
+			a.flashSimple(w, r, "new_server", "error", errMsg)
 			return
-		case !validateIPAddress(ip):
-			a.flashSimple(w, r, "new_server", "error", "Invalid IP address format")
-			return
-		case mac != "" && !validateMACAddress(mac):
-			a.flashSimple(w, r, "new_server", "error", "Invalid MAC address format (use AA:BB:CC:DD:EE:FF)")
-			return
-		}
-
-		bmc := r.PostFormValue("bmc_type")
-		if !model.ValidBMCType(bmc) {
-			bmc = model.BMCGeneric
 		}
 		s := &model.Server{
-			Name:            name,
-			IPAddress:       ip,
-			BMCType:         bmc,
-			RedfishUser:     r.PostFormValue("redfish_user"),
-			RedfishPassword: r.PostFormValue("redfish_password"),
-			IPMIUser:        r.PostFormValue("ipmi_user"),
-			IPMIPassword:    r.PostFormValue("ipmi_password"),
-			MACAddress:      mac,
-			Status:          "Off",
-			LastUpdated:     time.Now().UTC(),
-			Notes:           r.PostFormValue("notes"),
+			Name: f.Name, IPAddress: f.IPAddress, BMCType: f.BMCType,
+			RedfishUser: f.RedfishUser, RedfishPassword: f.RedfishPassword,
+			IPMIUser: f.IPMIUser, IPMIPassword: f.IPMIPassword,
+			MACAddress: f.MAC, Status: "Off", LastUpdated: time.Now().UTC(), Notes: f.Notes,
 		}
 		if err := a.store.CreateServer(s); err != nil {
 			a.serverError(w, r, err)
@@ -167,56 +215,45 @@ func (a *App) handleEditServer(w http.ResponseWriter, r *http.Request) {
 		a.notFoundOrError(w, r, err)
 		return
 	}
-
 	if r.Method == http.MethodPost {
-		name := sanitizeServerName(r.PostFormValue("name"))
-		ip := strings.TrimSpace(r.PostFormValue("ip_address"))
-		mac := strings.TrimSpace(r.PostFormValue("mac_address"))
-
-		switch {
-		case name == "":
-			a.editError(w, r, s, "Server name is required")
-			return
-		case !validateIPAddress(ip):
-			a.editError(w, r, s, "Invalid IP address format")
-			return
-		case mac != "" && !validateMACAddress(mac):
-			a.editError(w, r, s, "Invalid MAC address format (use AA:BB:CC:DD:EE:FF)")
-			return
-		}
-
-		bmc := r.PostFormValue("bmc_type")
-		if !model.ValidBMCType(bmc) {
-			bmc = model.BMCGeneric
-		}
-		s.Name = name
-		s.IPAddress = ip
-		s.BMCType = bmc
-		s.RedfishUser = r.PostFormValue("redfish_user")
-		s.IPMIUser = r.PostFormValue("ipmi_user")
-		s.MACAddress = mac
-		s.Notes = r.PostFormValue("notes")
-		s.LastUpdated = time.Now().UTC()
-
-		newRedfish := r.PostFormValue("redfish_password")
-		newIPMI := r.PostFormValue("ipmi_password")
-		setRedfish := newRedfish != ""
-		setIPMI := newIPMI != ""
-		if setRedfish {
-			s.RedfishPassword = newRedfish
-		}
-		if setIPMI {
-			s.IPMIPassword = newIPMI
-		}
-		if err := a.store.UpdateServer(s, setRedfish, setIPMI); err != nil {
-			a.serverError(w, r, err)
-			return
-		}
-		requestSession(r).flash("success", "Server updated successfully!")
-		http.Redirect(w, r, "/", http.StatusFound)
+		a.updateServer(w, r, s)
 		return
 	}
 	a.renderEdit(w, r, s)
+}
+
+// updateServer applies a validated form to s and persists it. On validation
+// error it re-renders the edit page with the unmodified server.
+func (a *App) updateServer(w http.ResponseWriter, r *http.Request, s *model.Server) {
+	f, errMsg := parseServerForm(r)
+	if errMsg != "" {
+		a.editError(w, r, s, errMsg)
+		return
+	}
+	s.Name = f.Name
+	s.IPAddress = f.IPAddress
+	s.BMCType = f.BMCType
+	s.RedfishUser = f.RedfishUser
+	s.IPMIUser = f.IPMIUser
+	s.MACAddress = f.MAC
+	s.Notes = f.Notes
+	s.LastUpdated = time.Now().UTC()
+
+	// Only overwrite a password when a new one was supplied.
+	setRedfish := f.RedfishPassword != ""
+	setIPMI := f.IPMIPassword != ""
+	if setRedfish {
+		s.RedfishPassword = f.RedfishPassword
+	}
+	if setIPMI {
+		s.IPMIPassword = f.IPMIPassword
+	}
+	if err := a.store.UpdateServer(s, setRedfish, setIPMI); err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	requestSession(r).flash("success", "Server updated successfully!")
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func (a *App) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
@@ -251,10 +288,10 @@ func (a *App) handlePowerAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
 	command, ok := actionToCommand(action)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid action"})
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "Invalid action"})
 		return
 	}
-	success, message := a.power.Send(s, command)
+	success, message := a.power.Send(r.Context(), s, command)
 	if success {
 		requestSession(r).flash("success", fmt.Sprintf("Server %s %sed successfully!", s.Name, action))
 	} else {
@@ -284,7 +321,7 @@ func (a *App) handleWakeOnLAN(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	success, message := a.power.Send(s, "power on")
+	success, message := a.power.Send(r.Context(), s, "power on")
 	if success {
 		requestSession(r).flash("success", fmt.Sprintf("Wake-on-LAN packet sent to %s", s.Name))
 	} else {
@@ -300,7 +337,7 @@ func (a *App) handleCheckAllServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, s := range servers {
-		a.power.CheckStatus(s)
+		a.power.CheckStatus(r.Context(), s)
 	}
 	requestSession(r).flash("success", fmt.Sprintf("Successfully updated status for all %d servers", len(servers)))
 	http.Redirect(w, r, "/", http.StatusFound)
@@ -322,16 +359,11 @@ func (a *App) handleAPIPowerAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
 	command, ok := actionToCommand(action)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid action"})
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "Invalid action"})
 		return
 	}
-	success, message := a.power.Send(s, command)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":   success,
-		"message":   message,
-		"server_id": id,
-		"action":    action,
-	})
+	success, message := a.power.Send(r.Context(), s, command)
+	writeJSON(w, http.StatusOK, apiPowerResult{Success: success, Message: message, ServerID: id, Action: action})
 }
 
 func (a *App) handleAPICheckStatus(w http.ResponseWriter, r *http.Request) {
@@ -345,8 +377,8 @@ func (a *App) handleAPICheckStatus(w http.ResponseWriter, r *http.Request) {
 		a.notFoundOrError(w, r, err)
 		return
 	}
-	status := a.power.CheckStatus(s)
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": status, "server_id": id})
+	status := a.power.CheckStatus(r.Context(), s)
+	writeJSON(w, http.StatusOK, apiStatusResult{Success: true, Status: status, ServerID: id})
 }
 
 // ---- console -------------------------------------------------------------
@@ -363,22 +395,22 @@ func (a *App) handleServerConsole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.RedfishUser == "" && s.IPMIUser == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"success":      false,
-			"error":        "No credentials configured for this server",
-			"fallback_url": "https://" + s.IPAddress + "/",
+		writeJSON(w, http.StatusBadRequest, consoleErrorResponse{
+			Success:     false,
+			Error:       "No credentials configured for this server",
+			FallbackURL: "https://" + s.IPAddress + "/",
 		})
 		return
 	}
 	token := a.console.GenerateToken(id, currentUser(r).ID)
 	launchURL := requestScheme(r) + "://" + r.Host + "/server/" + strconv.FormatInt(id, 10) +
 		"/console/launch?token=" + url.QueryEscape(token)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":        true,
-		"auto_login_url": launchURL,
-		"server_name":    s.Name,
-		"bmc_type":       s.BMCType,
-		"expires_in":     console.TokenValiditySeconds,
+	writeJSON(w, http.StatusOK, consoleLaunchResponse{
+		Success:      true,
+		AutoLoginURL: launchURL,
+		ServerName:   s.Name,
+		BMCType:      s.BMCType,
+		ExpiresIn:    console.TokenValiditySeconds,
 	})
 }
 
@@ -423,7 +455,7 @@ func (a *App) handleConsoleLaunch(w http.ResponseWriter, r *http.Request) {
 		a.renderConsole(w, "console_launch_idrac", consoleIdracData{
 			ServerID: s.ID, ServerName: s.Name, IPAddress: s.IPAddress, ConsoleURL: cfg.ConsoleURL,
 			Username: username, Password: password, HasUsername: username != "",
-			Auth: a.console.PreAuthenticateIDRAC(s),
+			Auth: a.console.PreAuthenticateIDRAC(r.Context(), s),
 		})
 	default:
 		a.renderConsole(w, "console_launch", consoleGenericData{

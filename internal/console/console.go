@@ -5,6 +5,7 @@ package console
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -29,6 +30,15 @@ import (
 // TokenValiditySeconds bounds how long a console launch token is usable.
 const TokenValiditySeconds = 30
 
+// bmcHTTPClient is shared across all BMC calls so its Transport can pool
+// connections; per-call deadlines come from the request context. TLS
+// verification is disabled because BMCs present self-signed certificates.
+var bmcHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
+	},
+}
+
 // Manager issues and verifies console access tokens and runs the iDRAC
 // credential pre-flight.
 type Manager struct {
@@ -38,17 +48,6 @@ type Manager struct {
 // NewManager builds a console Manager keyed by the application secret.
 func NewManager(secretKey []byte) *Manager {
 	return &Manager{secretKey: secretKey}
-}
-
-// insecureClient returns an HTTP client that skips TLS verification — BMCs use
-// self-signed certificates, so certificate validation is disabled throughout.
-func insecureClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
-		},
-	}
 }
 
 // CredsFor returns the (username, password) the console/protocol code should
@@ -153,7 +152,7 @@ type IDRACAuthResult struct {
 // PreAuthenticateIDRAC validates iDRAC credentials without leaking a session.
 // Any Redfish session opened during validation is deleted before returning, so
 // console launches can't exhaust the iDRAC session table.
-func (m *Manager) PreAuthenticateIDRAC(s *model.Server) IDRACAuthResult {
+func (m *Manager) PreAuthenticateIDRAC(ctx context.Context, s *model.Server) IDRACAuthResult {
 	ip := s.IPAddress
 	res := IDRACAuthResult{ConsoleURL: "https://" + ip + "/console"}
 
@@ -163,17 +162,15 @@ func (m *Manager) PreAuthenticateIDRAC(s *model.Server) IDRACAuthResult {
 		return res
 	}
 
-	if idracRedfishPreAuth(ip, user, pass, &res) {
-		idracLegacyPreAuth(ip, user, pass, &res)
+	if idracRedfishPreAuth(ctx, ip, user, pass, &res) {
+		idracLegacyPreAuth(ctx, ip, user, pass, &res)
 	}
 	return res
 }
 
 // idracRedfishPreAuth tries the Redfish SessionService (iDRAC 8/9). It returns
 // true when the caller should fall through to the legacy method.
-func idracRedfishPreAuth(ip, user, pass string, res *IDRACAuthResult) (tryLegacy bool) {
-	client := insecureClient(30 * time.Second)
-
+func idracRedfishPreAuth(ctx context.Context, ip, user, pass string, res *IDRACAuthResult) (tryLegacy bool) {
 	var sessionToken, sessionLocation string
 	defer func() {
 		// Always drop any session we created, on every return path.
@@ -182,15 +179,18 @@ func idracRedfishPreAuth(ip, user, pass string, res *IDRACAuthResult) (tryLegacy
 		}
 	}()
 
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	body, _ := json.Marshal(map[string]string{"UserName": user, "Password": pass})
-	req, err := http.NewRequest(http.MethodPost, "https://"+ip+"/redfish/v1/SessionService/Sessions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "https://"+ip+"/redfish/v1/SessionService/Sessions", bytes.NewReader(body))
 	if err != nil {
 		res.Error = err.Error()
 		return true
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := bmcHTTPClient.Do(req)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
@@ -200,7 +200,7 @@ func idracRedfishPreAuth(ip, user, pass string, res *IDRACAuthResult) (tryLegacy
 		res.Error = "Connection failed - iDRAC may be unreachable"
 		return false // unreachable: no point trying the legacy endpoint
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
@@ -209,7 +209,7 @@ func idracRedfishPreAuth(ip, user, pass string, res *IDRACAuthResult) (tryLegacy
 		res.Success = true
 		res.Method = "redfish"
 		if sessionToken != "" {
-			res.IDRACVersion = idracFirmwareVersion(ip, sessionToken)
+			res.IDRACVersion = idracFirmwareVersion(ctx, ip, sessionToken)
 		}
 		return false
 	case http.StatusUnauthorized:
@@ -221,32 +221,32 @@ func idracRedfishPreAuth(ip, user, pass string, res *IDRACAuthResult) (tryLegacy
 	}
 }
 
-func idracFirmwareVersion(ip, token string) string {
-	client := insecureClient(10 * time.Second)
-	req, err := http.NewRequest(http.MethodGet, "https://"+ip+"/redfish/v1/Managers/iDRAC.Embedded.1", nil)
+func idracFirmwareVersion(ctx context.Context, ip, token string) string {
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://"+ip+"/redfish/v1/Managers/iDRAC.Embedded.1", nil)
 	if err != nil {
 		return ""
 	}
 	req.Header.Set("X-Auth-Token", token)
-	resp, err := client.Do(req)
+	resp, err := bmcHTTPClient.Do(req)
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return ""
 	}
 	var data map[string]any
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data); err != nil {
-		// A JSON-parse failure leaves the version unset (treated the same as
-		// no version reported).
+		// A JSON-parse failure leaves the version unset.
 		return ""
 	}
 	if v, ok := data["FirmwareVersion"].(string); ok {
 		return v
 	}
-	// 200 OK with valid JSON but no FirmwareVersion key: fall back to
-	// "Unknown".
+	// 200 OK with valid JSON but no FirmwareVersion key: fall back to "Unknown".
 	return "Unknown"
 }
 
@@ -258,12 +258,18 @@ func idracCleanupSession(ip, token, location string) {
 	if strings.HasPrefix(location, "/") {
 		deleteURL = "https://" + ip + location
 	}
-	req, err := http.NewRequest(http.MethodDelete, deleteURL, nil)
+	// Cleanup must run even when the originating request was cancelled, so it
+	// gets its own short-lived background deadline rather than the request
+	// context — otherwise a cancelled launch would leak the iDRAC session.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
 	if err != nil {
 		return
 	}
 	req.Header.Set("X-Auth-Token", token)
-	resp, err := insecureClient(10 * time.Second).Do(req)
+	resp, err := bmcHTTPClient.Do(req)
 	if err != nil {
 		return
 	}
@@ -275,18 +281,28 @@ var authResultPattern = regexp.MustCompile(`<authResult>(\d+)</authResult>`)
 // idracLegacyPreAuth tries the legacy /data/login endpoint (iDRAC 6/7/8). Any
 // cookies it returns are intentionally discarded — they can't be shared
 // cross-origin with the browser.
-func idracLegacyPreAuth(ip, user, pass string, res *IDRACAuthResult) {
-	client := insecureClient(30 * time.Second)
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+func idracLegacyPreAuth(ctx context.Context, ip, user, pass string, res *IDRACAuthResult) {
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
-	resp, err := client.PostForm("https://"+ip+"/data/login", url.Values{"user": {user}, "password": {pass}})
+	form := strings.NewReader(url.Values{"user": {user}, "password": {pass}}.Encode())
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "https://"+ip+"/data/login", form)
 	if err != nil {
 		if res.Error == "" {
 			res.Error = err.Error()
 		}
 		return
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := bmcHTTPClient.Do(req)
+	if err != nil {
+		if res.Error == "" {
+			res.Error = err.Error()
+		}
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return

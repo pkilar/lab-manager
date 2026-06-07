@@ -14,7 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -153,7 +153,7 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 func LoadEncryptionKey(instanceDir string) ([]byte, error) {
 	if env := os.Getenv("LAB_MANAGER_ENCRYPTION_KEY"); env != "" {
 		if _, err := NewFernet([]byte(env)); err != nil {
-			log.Printf("ERROR: invalid LAB_MANAGER_ENCRYPTION_KEY format; falling back to key file")
+			slog.Error("invalid LAB_MANAGER_ENCRYPTION_KEY format; falling back to key file")
 		} else {
 			return []byte(env), nil
 		}
@@ -175,6 +175,6 @@ func LoadEncryptionKey(instanceDir string) ([]byte, error) {
 	if err := os.WriteFile(keyFile, encoded, 0o600); err != nil {
 		return nil, err
 	}
-	log.Printf("WARNING: generated new encryption key saved to %s", keyFile)
+	slog.Warn("generated new encryption key", "path", keyFile)
 	return encoded, nil
 }

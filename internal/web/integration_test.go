@@ -74,7 +74,7 @@ func postForm(t *testing.T, c *http.Client, target string, form url.Values) *htt
 
 func readBody(t *testing.T, resp *http.Response) string {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var sb strings.Builder
 	buf := make([]byte, 4096)
 	for {
@@ -190,4 +190,16 @@ func TestInvalidLoginAndLogout(t *testing.T) {
 
 	resp, _ = get(t, c, base+"/logout")
 	mustRedirect(t, resp, "/login")
+}
+
+// TestSecurityHeaders confirms the hardening headers are present on responses.
+func TestSecurityHeaders(t *testing.T) {
+	srv, c, _ := testServer(t)
+	resp, _ := get(t, c, srv.URL+"/login")
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
 }

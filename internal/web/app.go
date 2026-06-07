@@ -37,8 +37,8 @@ func New(st *store.Store, secretKey []byte, wolEnabled bool) (*App, error) {
 	}, nil
 }
 
-// Handler builds the full middleware chain: session loading (outermost), then
-// CSRF validation, then the router.
+// Handler builds the full middleware chain (outermost first): security headers,
+// request-body limit, session loading + panic recovery, CSRF validation, router.
 func (a *App) Handler() http.Handler {
-	return a.withSession(a.withCSRF(a.routes()))
+	return securityHeaders(limitRequestBody(a.withSession(a.withCSRF(a.routes()))))
 }
