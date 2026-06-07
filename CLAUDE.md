@@ -117,14 +117,7 @@ All routes except `/login` require authentication (`@login_required`).
 
 ### Docker Swarm (primary)
 
-`docker-stack.yml` is the Swarm-native deploy file (`docker stack deploy -c docker-stack.yml --with-registry-auth lab-manager`). **This is how the app is actually deployed** — the `k8s/` manifests below are secondary/vestigial. Swarm **ignores** `build:`, `container_name:`, `network_mode:`, and `restart:`, so the stack: pulls the image from `registry.home.kilar.net` (never builds), provides host networking for WoL via the external `host` network, runs a single replica pinned to a labeled node with `update_config: order: stop-first` (SQLite is single-writer — the Recreate equivalent), and persists data in the `lab_manager_instance` named volume.
-
-### Kubernetes (`k8s/`)
-- Kustomize-based (`kustomization.yaml` wires namespace, secret, configmap, pvc, deployment, service; ingress is opt-in).
-- `hostNetwork: true` + `dnsPolicy: ClusterFirstWithHostNet` for WoL (effectively 1 replica per node).
-- `Recreate` strategy + single replica to avoid SQLite concurrent-write corruption.
-- Liveness/readiness probes hit `/login`. Config via configmap + secret `envFrom`; data on a PVC mounted at `/app/instance`.
-- See `k8s/README.md` for image build/push and configuration details.
+`docker-stack.yml` is the Swarm-native deploy file (`docker stack deploy -c docker-stack.yml --with-registry-auth lab-manager`). **This is how the app is actually deployed** (there are no Kubernetes manifests in this repo). Swarm **ignores** `build:`, `container_name:`, `network_mode:`, and `restart:`, so the stack: pulls the image from `registry.home.kilar.net` (never builds), provides host networking for WoL via the external `host` network, runs a single replica pinned to a labeled node with `update_config: order: stop-first` (SQLite is single-writer — the Recreate equivalent), and persists data in the `lab_manager_instance` named volume.
 
 ## Protocol Implementation Notes
 

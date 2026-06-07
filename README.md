@@ -135,7 +135,6 @@ server won't wake:
    - **Docker Swarm**: `network_mode` is ignored by `docker stack deploy`; attach the
      service to the external `host` network instead (a `networks:` entry with
      `external: true` and `name: host`).
-   - **Kubernetes**: `hostNetwork: true` (already set in `k8s/deployment.yaml`).
 3. **Same broadcast domain** — the host running this app must be on the **same L2
    subnet/VLAN** as the target. The app broadcasts to `255.255.255.255` on UDP ports
    9 and 7, plus the target's `/24` subnet broadcast on port 9; routers don't forward
@@ -211,7 +210,7 @@ python test_wol.py <MAC_ADDRESS> [TARGET_IP]
 ### Security Notes
 
 - Default admin credentials should be changed immediately
-- Server credentials stored in database (plaintext)
+- Server credentials encrypted at rest with Fernet (key in `instance/.encryption_key`)
 - SSL verification disabled for Redfish connections
 - SECRET_KEY should be set for production deployments
 
