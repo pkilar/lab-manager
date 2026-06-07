@@ -1,6 +1,6 @@
 # Home Lab Server Manager
 
-A Flask web application for managing physical servers via IPMI and Redfish protocols. Control server power states (on/off/restart) and monitor server status through a simple web interface.
+A Go web application for managing physical servers via IPMI and Redfish protocols. Control server power states (on/off/restart) and monitor server status through a simple web interface. Ships as a single static binary with templates embedded.
 
 ## Features
 
@@ -71,11 +71,11 @@ docker-compose down -v
 Set these in your environment or create a `.env` file:
 
 ```bash
-# Production secret key (IMPORTANT!)
-FLASK_SECRET_KEY=your-secure-random-key-here
+# Session-cookie signing key (IMPORTANT!). Generate with: openssl rand -hex 32
+LAB_MANAGER_SECRET_KEY=your-secure-random-key-here
 
-# Flask environment
-FLASK_ENV=production
+# Fernet key for encrypting stored credentials (optional; auto-generated if unset)
+LAB_MANAGER_ENCRYPTION_KEY=...
 
 # Wake-on-LAN feature toggle (disabled by default). See "Wake-on-LAN" below.
 WOL_ENABLED=false
@@ -86,7 +86,7 @@ WOL_ENABLED=false
 For production, always set a secure SECRET_KEY:
 
 ```bash
-export FLASK_SECRET_KEY="$(openssl rand -hex 32)"
+export LAB_MANAGER_SECRET_KEY="$(openssl rand -hex 32)"
 docker-compose up -d
 ```
 
@@ -166,11 +166,7 @@ Watch the logs while sending a packet — each broadcast attempt is logged:
 docker-compose logs -f
 ```
 
-You can also test packet delivery independently of the app:
-
-```bash
-python test_wol.py <MAC_ADDRESS> [TARGET_IP]
-```
+Each server with a MAC address gets an explicit **WoL** button (when the feature is enabled) you can use to send a packet on demand and watch the result in the logs.
 
 ## Usage
 
@@ -228,18 +224,9 @@ See [CLAUDE.md](CLAUDE.md) for detailed development documentation.
 
 ### Local Development (Without Docker)
 
-1. Create virtual environment:
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
+Requires Go 1.26+.
 
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-3. Install system dependencies:
+1. Install the `ipmitool` system dependency (needed for IPMI power control):
 ```bash
 # Ubuntu/Debian
 sudo apt-get install ipmitool
@@ -251,9 +238,18 @@ brew install ipmitool
 apk add ipmitool
 ```
 
-4. Run the application:
+2. Build and run the application (listens on `localhost:5000`):
 ```bash
-python app.py
+go build -o lab-manager ./cmd/lab-manager
+./lab-manager
+
+# or run directly
+go run ./cmd/lab-manager
+```
+
+3. Run the tests:
+```bash
+go test ./...
 ```
 
 ## License

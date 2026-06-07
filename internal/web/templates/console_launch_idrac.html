@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Console - {{.ServerName}}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            padding: 20px;
+        }
+        .container {
+            text-align: center;
+            padding: 30px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            max-width: 550px;
+            width: 100%;
+        }
+        .server-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
+        h1 {
+            font-size: 1.3rem;
+            margin-bottom: 5px;
+            color: #4ade80;
+        }
+        .server-name {
+            font-size: 1.1rem;
+            color: #60a5fa;
+            margin-bottom: 10px;
+        }
+        .bmc-type {
+            display: inline-block;
+            padding: 4px 12px;
+            background: rgba(96, 165, 250, 0.2);
+            border-radius: 20px;
+            font-size: 0.8rem;
+            color: #60a5fa;
+            margin-bottom: 15px;
+        }
+        .auth-status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            margin-left: 8px;
+        }
+        .auth-status.success {
+            background: rgba(74, 222, 128, 0.2);
+            color: #4ade80;
+        }
+        .auth-status.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+        .status-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+        .status-message {
+            font-size: 1rem;
+            margin-bottom: 10px;
+        }
+        .status-detail {
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #4ade80;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .progress-steps {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 15px;
+        }
+        .step {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+            transition: all 0.3s;
+        }
+        .step.active {
+            background: #4ade80;
+        }
+        .step.error {
+            background: #ef4444;
+        }
+        .error-box {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .error-box h3 {
+            color: #ef4444;
+            margin-bottom: 10px;
+        }
+        .error-box p {
+            font-size: 0.9rem;
+            color: #fca5a5;
+        }
+        .success-box {
+            background: rgba(74, 222, 128, 0.2);
+            border: 1px solid rgba(74, 222, 128, 0.4);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .success-box h3 {
+            color: #4ade80;
+            margin-bottom: 10px;
+        }
+        .manual-login {
+            display: none;
+            margin-top: 20px;
+        }
+        .credentials-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: left;
+        }
+        .credentials-box h3 {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .credential-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+        }
+        .credential-row:last-child {
+            margin-bottom: 0;
+        }
+        .credential-label {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            margin-bottom: 2px;
+        }
+        .credential-value {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 1rem;
+            color: #fff;
+        }
+        .copy-btn {
+            padding: 6px 12px;
+            background: #4ade80;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .copy-btn:hover {
+            background: #22c55e;
+        }
+        .copy-btn.copied {
+            background: #60a5fa;
+        }
+        .launch-btn {
+            display: block;
+            width: 100%;
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+            color: #1a1a2e;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            font-weight: 700;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+            margin-bottom: 10px;
+        }
+        .launch-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(74, 222, 128, 0.3);
+        }
+        .secondary-btn {
+            display: block;
+            width: 100%;
+            padding: 12px 25px;
+            background: rgba(96, 165, 250, 0.2);
+            color: #60a5fa;
+            border: 1px solid rgba(96, 165, 250, 0.4);
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+        }
+        .secondary-btn:hover {
+            background: rgba(96, 165, 250, 0.3);
+        }
+        .back-link {
+            margin-top: 20px;
+        }
+        .back-link a {
+            color: #60a5fa;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .back-link a:hover {
+            text-decoration: underline;
+        }
+        .info-text {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-top: 15px;
+        }
+        .hidden {
+            display: none;
+        }
+        .debug-info {
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+            font-size: 0.75rem;
+            color: #6b7280;
+            text-align: left;
+            display: none;
+        }
+        .debug-info.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="server-icon">🖥️</div>
+        <h1>KVM Console</h1>
+        <div class="server-name">{{.ServerName}}</div>
+        <div>
+            <span class="bmc-type">Dell iDRAC</span>
+            {{if .Auth.Success}}
+            <span class="auth-status success">Credentials verified</span>
+            {{else}}
+            <span class="auth-status error">Auth failed</span>
+            {{end}}
+        </div>
+
+        <!-- Status during auto-login -->
+        <div class="status-box" id="statusBox">
+            <div class="spinner" id="spinner"></div>
+            <div class="status-message" id="statusMessage">Initializing...</div>
+            <div class="status-detail" id="statusDetail">Preparing iDRAC connection</div>
+            <div class="progress-steps">
+                <div class="step" id="step1"></div>
+                <div class="step" id="step2"></div>
+                <div class="step" id="step3"></div>
+            </div>
+        </div>
+
+        <!-- Error display -->
+        <div class="error-box" id="errorBox">
+            <h3>Connection Issue</h3>
+            <p id="errorMessage">Unable to connect. Please use manual login below.</p>
+        </div>
+
+        <!-- Ready display (shown after iDRAC window is opened) -->
+        <div class="success-box" id="successBox">
+            <h3>iDRAC Window Opened</h3>
+            <p>Use the credentials below to sign in. If you see a certificate
+               warning, accept it to continue to the iDRAC login page.</p>
+        </div>
+
+        <!-- Launch / manual login panel -->
+        <div class="manual-login" id="manualLogin">
+            {{if .HasUsername}}
+            <div class="credentials-box">
+                <h3>Login Credentials</h3>
+                <div class="credential-row">
+                    <div>
+                        <div class="credential-label">Username</div>
+                        <div class="credential-value">{{.Username}}</div>
+                    </div>
+                    <button class="copy-btn" onclick="copyToClipboard({{js .Username}}, this)">Copy</button>
+                </div>
+                <div class="credential-row">
+                    <div>
+                        <div class="credential-label">Password</div>
+                        <div class="credential-value">••••••••</div>
+                    </div>
+                    <button class="copy-btn" onclick="copyToClipboard({{js .Password}}, this)">Copy</button>
+                </div>
+            </div>
+            {{end}}
+            <button class="launch-btn" id="launchKvmBtn" onclick="launchKVM()">
+                Launch KVM Console
+            </button>
+            <a href="https://{{.IPAddress}}/" target="_blank" rel="noopener" class="secondary-btn">
+                Open iDRAC Login (Manual)
+            </a>
+            <p class="info-text">
+                <strong>First launch?</strong> If a certificate warning appears in
+                the popup, accept it once for <code>{{.IPAddress}}</code>
+                and click Launch again. Subsequent launches will sign in and open
+                the HTML5 KVM viewer automatically.
+            </p>
+        </div>
+
+        <div class="back-link">
+            <a href="/">← Back to Server List</a>
+        </div>
+
+        <!-- Debug info (click status 5 times to show) -->
+        <div class="debug-info" id="debugInfo">
+            <strong>Debug Info:</strong><br>
+            Auth Method: {{if .Auth.Method}}{{.Auth.Method}}{{else}}None{{end}}<br>
+            Auth Success: {{if .Auth.Success}}True{{else}}False{{end}}<br>
+            {{if .Auth.IDRACVersion}}
+            iDRAC Version: {{.Auth.IDRACVersion}}<br>
+            {{end}}
+            {{if .Auth.Error}}
+            Error: {{.Auth.Error}}<br>
+            {{end}}
+        </div>
+    </div>
+
+    <script>
+        // Configuration from server.
+        // Auto-login strategy: we POST credentials via a form targeting a
+        // named popup window (NOT a hidden iframe). The popup is a top-level
+        // browsing context at the iDRAC origin, so Set-Cookie lands as a
+        // first-party cookie, TLS warnings can be accepted by the user, and
+        // the opener can navigate the popup cross-origin to the console URL.
+        // See launchKVM() below for the full flow and caveats.
+        const CONFIG = {
+            ip: {{js .IPAddress}},
+            consoleUrl: {{js .ConsoleURL}},
+            username: {{js .Username}},
+            password: {{js .Password}},
+            authSuccess: {{if .Auth.Success}}true{{else}}false{{end}},
+            authMethod: {{js .Auth.Method}},
+            authError: {{if .Auth.Error}}{{js .Auth.Error}}{{else}}null{{end}}
+        };
+
+        let consoleWindow = null;
+        let currentStep = 0;
+        let debugClickCount = 0;
+
+        function updateStatus(message, detail) {
+            document.getElementById('statusMessage').textContent = message;
+            if (detail) {
+                document.getElementById('statusDetail').textContent = detail;
+            }
+        }
+
+        function setStep(step, error = false) {
+            for (let i = 1; i <= 3; i++) {
+                const stepEl = document.getElementById('step' + i);
+                stepEl.classList.remove('active', 'error');
+                if (i <= step) {
+                    stepEl.classList.add(error && i === step ? 'error' : 'active');
+                }
+            }
+            currentStep = step;
+        }
+
+        function showError(message) {
+            document.getElementById('statusBox').style.display = 'none';
+            document.getElementById('errorBox').style.display = 'block';
+            document.getElementById('errorMessage').textContent = message;
+            document.getElementById('manualLogin').style.display = 'block';
+            setStep(currentStep, true);
+        }
+
+        function showReady() {
+            // Called after we successfully opened a top-level iDRAC window.
+            // We cannot observe the cross-origin login result, so we present
+            // a neutral "ready" state with credentials instead of claiming
+            // the console is logged in.
+            document.getElementById('statusBox').style.display = 'none';
+            document.getElementById('successBox').style.display = 'block';
+            document.getElementById('manualLogin').style.display = 'block';
+            setStep(3);
+        }
+
+        function copyToClipboard(text, button) {
+            function showCopied() {
+                const originalText = button.textContent;
+                button.textContent = 'Copied!';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('copied');
+                }, 1500);
+            }
+
+            function legacyCopy(value) {
+                // Synchronous fallback using a temporary textarea +
+                // execCommand('copy'). MUST run inside the click handler
+                // (not from a Promise callback) or the browser will drop
+                // the operation for missing user activation.
+                const textarea = document.createElement('textarea');
+                textarea.value = value;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.top = '0';
+                textarea.style.left = '0';
+                textarea.style.width = '2em';
+                textarea.style.height = '2em';
+                textarea.style.padding = '0';
+                textarea.style.border = 'none';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                const previouslyFocused = document.activeElement;
+                textarea.focus();
+                textarea.select();
+                textarea.setSelectionRange(0, value.length); // iOS Safari
+                let ok = false;
+                try {
+                    ok = document.execCommand('copy');
+                } catch (e) {
+                    ok = false;
+                }
+                document.body.removeChild(textarea);
+                if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+                    previouslyFocused.focus();
+                }
+                return ok;
+            }
+
+            // navigator.clipboard is only available in secure contexts
+            // (HTTPS / localhost / file://). Lab manager is commonly served
+            // over plain HTTP on a LAN, so fall back to execCommand('copy')
+            // SYNCHRONOUSLY when the modern API is unavailable. Waiting for
+            // the writeText() Promise to reject would lose the user
+            // activation window and cause the copy to silently fail - which
+            // is the bug this function is fixing.
+            if (!window.isSecureContext || !navigator.clipboard || !navigator.clipboard.writeText) {
+                if (legacyCopy(text)) {
+                    showCopied();
+                } else {
+                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
+                }
+                return;
+            }
+
+            navigator.clipboard.writeText(text).then(showCopied, function () {
+                // Secure context but clipboard permission denied - try the
+                // legacy path as a last resort. User activation may already
+                // be gone, so this may also fail; the prompt() is the final
+                // visible fallback.
+                if (legacyCopy(text)) {
+                    showCopied();
+                } else {
+                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
+                }
+            });
+        }
+
+        /**
+         * Auto-login to iDRAC and open the HTML5 KVM console.
+         *
+         * Strategy:
+         *   1. Open a named popup window (this click is the required user
+         *      gesture - a popup opened from window.load is usually blocked).
+         *   2. Submit a form POST to iDRAC's /data/login endpoint targeting
+         *      that popup. Because the POST is a top-level navigation of the
+         *      popup, iDRAC's Set-Cookie response lands as a FIRST-PARTY
+         *      cookie on the iDRAC origin - not a third-party cookie subject
+         *      to SameSite/ITP/CHIPS blocking. This is the key difference vs
+         *      the hidden-iframe approach that was deliberately avoided here.
+         *   3. Wait briefly for iDRAC to persist the session. We cannot
+         *      observe the cross-origin load event, so a fixed delay is the
+         *      best we can do without a server-side reverse proxy.
+         *   4. Navigate the popup to the console URL from the opener.
+         *      WindowProxy.location.href = x is permitted cross-origin for
+         *      opener-owned popups; the browser issues a same-origin GET
+         *      that carries the session cookie and lands logged in.
+         *
+         * Failure modes and mitigations:
+         *   - Self-signed TLS cert not trusted -> browser intercepts the POST
+         *     with a cert warning. User must accept once; we tell them so.
+         *   - Popup blocked -> showError() and re-enable the launch button.
+         *   - Popup closed mid-flight -> detect via popup.closed and abort.
+         *   - iDRAC slower than delay -> rare; re-clicking Launch recovers
+         *     because the session cookie is already set from the first POST.
+         */
+        function renderPopupPlaceholder(popup, ip) {
+            // Render a friendly placeholder using DOM APIs (safer than
+            // document.write, which is blocked by our CSP / security hook).
+            // Only works before the popup navigates cross-origin; after that
+            // we lose DOM access and the try/catch swallows the error.
+            try {
+                const doc = popup.document;
+                doc.title = 'Connecting to iDRAC...';
+                const body = doc.body;
+                if (!body) return;
+                // Clear any existing children
+                while (body.firstChild) body.removeChild(body.firstChild);
+                body.style.cssText = 'font-family:-apple-system,sans-serif;background:#1a1a2e;'
+                    + 'color:#fff;display:flex;align-items:center;justify-content:center;'
+                    + 'height:100vh;margin:0;';
+                const wrap = doc.createElement('div');
+                wrap.style.cssText = 'text-align:center;padding:20px;';
+                const h2 = doc.createElement('h2');
+                h2.textContent = 'Signing in to iDRAC...';
+                h2.style.cssText = 'color:#4ade80;margin-bottom:10px;';
+                const p = doc.createElement('p');
+                p.textContent = 'If prompted, accept the security certificate for ' + ip + '.';
+                wrap.appendChild(h2);
+                wrap.appendChild(p);
+                body.appendChild(wrap);
+            } catch (e) {
+                // Popup already navigated cross-origin, or not yet ready.
+            }
+        }
+
+        async function launchKVM() {
+            const btn = document.getElementById('launchKvmBtn');
+            if (btn) btn.disabled = true;
+
+            // Reset UI
+            document.getElementById('errorBox').style.display = 'none';
+            document.getElementById('successBox').style.display = 'none';
+            document.getElementById('statusBox').style.display = 'block';
+            document.getElementById('spinner').style.display = 'block';
+            setStep(1);
+            updateStatus('Opening console window...', 'Waiting for popup');
+
+            // Unique popup name per server so multiple KVMs can coexist
+            // in separate windows without clobbering each other.
+            const winName = 'iDRACKVM_{{.ServerID}}';
+            const winFeatures = 'width=1280,height=900,menubar=no,toolbar=no,location=yes,status=yes';
+            const popup = window.open('about:blank', winName, winFeatures);
+            if (!popup || popup.closed) {
+                if (btn) btn.disabled = false;
+                showError('Pop-up blocked. Please allow pop-ups for this site, then click Launch again.');
+                return;
+            }
+            consoleWindow = popup;
+            renderPopupPlaceholder(popup, CONFIG.ip);
+
+            setStep(2);
+            updateStatus('Submitting credentials...', 'POST /data/login');
+
+            // Build and submit a form POST targeting the named popup.
+            const existing = document.getElementById('__iDRACLoginForm');
+            if (existing) existing.remove();
+
+            const form = document.createElement('form');
+            form.id = '__iDRACLoginForm';
+            form.method = 'POST';
+            form.action = 'https://' + CONFIG.ip + '/data/login';
+            form.target = winName;
+            form.enctype = 'application/x-www-form-urlencoded';
+            form.style.display = 'none';
+
+            const addField = (name, value) => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = name;
+                input.value = value;
+                form.appendChild(input);
+            };
+            addField('user', CONFIG.username);
+            addField('password', CONFIG.password);
+
+            document.body.appendChild(form);
+            form.submit();
+
+            // Wait for iDRAC to process the POST and set the session cookie.
+            // 2.5s is a conservative default that works on both iDRAC8 and iDRAC9.
+            // If your iDRAC is slow, bump this up.
+            updateStatus('Authenticating...', 'Waiting for iDRAC response');
+            await sleep(2500);
+
+            if (popup.closed) {
+                if (btn) btn.disabled = false;
+                showError('Login window was closed before the console could load.');
+                return;
+            }
+
+            setStep(3);
+            updateStatus('Opening KVM console...', 'Loading HTML5 viewer');
+
+            // Navigate the popup to the console URL. The session cookie set
+            // by the POST response is now first-party to the iDRAC origin
+            // and will be sent with this GET - landing us logged in.
+            try {
+                popup.location.href = CONFIG.consoleUrl;
+            } catch (e) {
+                if (btn) btn.disabled = false;
+                showError('Could not navigate to console: ' + e.message);
+                return;
+            }
+
+            await sleep(800);
+            showReady();
+            if (btn) btn.disabled = false;
+        }
+
+        // Main launch flow:
+        //   1. Surface the server-side credential check result.
+        //   2. On credential success, open a top-level iDRAC window (this
+        //      counts as a user gesture because the <body> load handler
+        //      runs inside the click that navigated to this page in most
+        //      browsers - if the pop-up is blocked, we surface the manual
+        //      "Open Console" button instead).
+        //   3. Never claim the console is "opened successfully" - we cannot
+        //      observe the cross-origin login and saying otherwise would be
+        //      a lie. We only claim "window opened" or "credentials valid".
+        async function attemptAutoLogin() {
+            setStep(1);
+            updateStatus('Verifying credentials...', 'Checking iDRAC authentication');
+            await sleep(300);
+
+            if (!CONFIG.authSuccess) {
+                // Server-side pre-auth failed. Do not open any window
+                // automatically - the credentials on file do not work, so
+                // opening a new tab would just dump the user at an empty
+                // iDRAC login with no useful state. Show the manual path.
+                const detail = CONFIG.authError
+                    ? 'Server-side check: ' + CONFIG.authError
+                    : 'Unable to verify stored credentials.';
+                showError(detail + ' You can still attempt to log in manually using the credentials below.');
+                return;
+            }
+
+            setStep(2);
+            updateStatus('Credentials verified', 'Ready to launch KVM console');
+            await sleep(300);
+
+            // Show the launch panel and wait for a user click. Browsers
+            // require a fresh user gesture to open the popup AND to provide
+            // the first-party cookie context that makes auto-login work,
+            // so we intentionally do NOT auto-launch on page load.
+            document.getElementById('spinner').style.display = 'none';
+            updateStatus('Ready to launch', 'Click "Launch KVM Console" below to sign in');
+            document.getElementById('manualLogin').style.display = 'block';
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        // Debug mode toggle
+        document.getElementById('statusBox').addEventListener('click', function() {
+            debugClickCount++;
+            if (debugClickCount >= 5) {
+                document.getElementById('debugInfo').classList.toggle('show');
+                debugClickCount = 0;
+            }
+        });
+
+        // Start launch flow on page load
+        window.addEventListener('load', () => {
+            attemptAutoLogin();
+        });
+    </script>
+</body>
+</html>

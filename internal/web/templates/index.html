@@ -1,0 +1,198 @@
+{{define "title"}}Servers - Home Lab Server Manager{{end}}
+
+{{define "content"}}
+<div style="margin-bottom: 20px;">
+    <a href="/server/new" class="btn btn-primary">Add New Server</a>
+    <form method="POST" action="/check-all-servers" style="display: inline;">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button type="submit" class="btn btn-info">Check All Servers Status</button>
+    </form>
+</div>
+
+{{if .Servers}}
+<div class="servers-table">
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>IP Address</th>
+                <th class="bmc-cell">BMC Type</th>
+                <th>Status</th>
+                <th>Last Updated</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Servers}}
+            <tr>
+                <td>
+                    <strong>{{.Name}}</strong>
+                    {{if .NotesPreview}}
+                    <div class="text-muted">{{.NotesPreview}}{{if .NotesTruncated}}...{{end}}</div>
+                    {{end}}
+                </td>
+                <td>{{.IPAddress}}</td>
+                <td class="bmc-cell">
+                    <span class="bmc-badge bmc-{{.BMCType}}">
+                        {{if eq .BMCType "idrac"}}iDRAC
+                        {{else if eq .BMCType "supermicro"}}Supermicro
+                        {{else if eq .BMCType "ilo"}}iLO
+                        {{else}}Generic
+                        {{end}}
+                    </span>
+                    {{if .HasCreds}}
+                    <span style="color: green; font-size: 0.8em;" title="Credentials configured">🔑</span>
+                    {{end}}
+                    {{if and $.WolEnabled .HasMAC}}
+                    <span style="color: #17a2b8; font-size: 0.8em;" title="WoL enabled">📡</span>
+                    {{end}}
+                </td>
+                <td>
+                    <span class="status {{if .StatusOn}}on{{else}}off{{end}}">
+                        {{if .Status}}{{.Status}}{{else}}Unknown{{end}}
+                    </span>
+                </td>
+                <td>
+                    {{if .HasLastUpdated}}
+                    <span class="local-time" data-utc="{{.LastUpdatedUTC}}Z">
+                        {{.LastUpdatedLocal}}
+                    </span>
+                    {{else}}
+                    Never
+                    {{end}}
+                </td>
+                <td>
+                    <div class="action-buttons">
+                        <button type="button" class="btn btn-info btn-sm"
+                            onclick="openConsole({{.ID}}, '{{.Name}}')">
+                            Console
+                        </button>
+                        <a href="/server/{{.ID}}/edit"
+                            class="btn btn-secondary btn-sm">Edit</a>
+                        <form method="POST" action="/server/{{.ID}}/delete"
+                            style="display: inline;">
+                            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                            <button type="submit" class="btn btn-danger btn-sm"
+                                onclick="return confirm('Are you sure you want to delete this server?')">Delete</button>
+                        </form>
+                        <form method="POST"
+                            action="/api/server/{{.ID}}/power/start"
+                            style="display: inline;">
+                            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                            <button type="submit" class="btn btn-success btn-sm"
+                                onclick="return confirm('Start this server?')">Start</button>
+                        </form>
+                        <form method="POST"
+                            action="/api/server/{{.ID}}/power/stop"
+                            style="display: inline;">
+                            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                            <button type="submit" class="btn btn-danger btn-sm"
+                                onclick="return confirm('Stop this server?')">Stop</button>
+                        </form>
+                        <form method="POST"
+                            action="/api/server/{{.ID}}/power/restart"
+                            style="display: inline;">
+                            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                            <button type="submit" class="btn btn-warning btn-sm"
+                                onclick="return confirm('Restart this server?')">Restart</button>
+                        </form>
+                        {{if and $.WolEnabled .HasMAC}}
+                        <form method="POST"
+                            action="/server/{{.ID}}/wol"
+                            style="display: inline;">
+                            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                            <button type="submit" class="btn btn-primary btn-sm"
+                                onclick="return confirm('Send Wake-on-LAN packet?')">WoL</button>
+                        </form>
+                        {{end}}
+                    </div>
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{else}}
+<div class="servers-table">
+    <div style="padding: 40px; text-align: center; background-color: white;">
+        <p>No servers configured yet.</p>
+        <a href="/server/new" class="btn btn-primary">Add your first server</a>
+    </div>
+</div>
+{{end}}
+
+<script>
+    function openConsole(serverId, serverName) {
+        // Fetch the auto-login URL from the backend
+        fetch('/server/' + serverId + '/console')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.auto_login_url) {
+                    // Open the auto-login page which will handle BMC authentication
+                    const consoleWindow = window.open(data.auto_login_url, '_blank', 'width=600,height=400');
+                    if (!consoleWindow) {
+                        alert('Pop-up blocked! Please allow pop-ups for this site.\n\n' +
+                            'You can also open the console by clicking this link:\n' +
+                            data.auto_login_url);
+                    }
+                } else if (data.fallback_url) {
+                    // No credentials configured - open fallback URL
+                    const fallbackWindow = window.open(data.fallback_url, '_blank');
+                    if (!fallbackWindow) {
+                        alert('Pop-up blocked! Please allow pop-ups.\n\n' +
+                            'Fallback URL: ' + data.fallback_url);
+                    } else {
+                        alert('No credentials configured for ' + serverName + '.\n' +
+                            'Opening management interface for manual login.');
+                    }
+                } else {
+                    alert('Error: ' + (data.error || 'Unable to get console URL for ' + serverName));
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching console URL:', error);
+                alert('Error opening console for ' + serverName + '. Please check the console for details.');
+            });
+    }
+
+    // Convert UTC times to browser's local timezone
+    function convertTimesToLocal() {
+        const timeElements = document.querySelectorAll('.local-time');
+
+        timeElements.forEach(element => {
+            const utcTimeStr = element.getAttribute('data-utc');
+            if (!utcTimeStr) return;
+
+            try {
+                // Parse the UTC time
+                const utcDate = new Date(utcTimeStr);
+
+                // Format in browser's local timezone
+                const options = {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false
+                };
+
+                const localTimeStr = utcDate.toLocaleString('en-CA', options).replace(',', '');
+
+                // Get timezone abbreviation
+                const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+                // Display the local time with timezone
+                element.textContent = `${localTimeStr} (${timeZone})`;
+            } catch (error) {
+                console.error('Error converting time:', error);
+                // Keep the original server-side formatted time on error
+            }
+        });
+    }
+
+    // Run conversion when page loads
+    document.addEventListener('DOMContentLoaded', convertTimesToLocal);
+</script>
+{{end}}

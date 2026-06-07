@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Console - {{.ServerName}}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            padding: 20px;
+        }
+        .container {
+            text-align: center;
+            padding: 30px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            max-width: 450px;
+            width: 100%;
+        }
+        .server-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
+        h1 {
+            font-size: 1.3rem;
+            margin-bottom: 5px;
+            color: #4ade80;
+        }
+        .server-name {
+            font-size: 1.1rem;
+            color: #60a5fa;
+            margin-bottom: 20px;
+        }
+        .bmc-type {
+            display: inline-block;
+            padding: 4px 12px;
+            background: rgba(96, 165, 250, 0.2);
+            border-radius: 20px;
+            font-size: 0.8rem;
+            color: #60a5fa;
+            margin-bottom: 20px;
+        }
+        .credentials-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: left;
+        }
+        .credentials-box h3 {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .credential-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+        }
+        .credential-row:last-child {
+            margin-bottom: 0;
+        }
+        .credential-label {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            margin-bottom: 2px;
+        }
+        .credential-value {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 1rem;
+            color: #fff;
+            word-break: break-all;
+        }
+        .copy-btn {
+            padding: 6px 12px;
+            background: #4ade80;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .copy-btn:hover {
+            background: #22c55e;
+            transform: scale(1.05);
+        }
+        .copy-btn.copied {
+            background: #60a5fa;
+        }
+        .launch-btn {
+            display: block;
+            width: 100%;
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+            color: #1a1a2e;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            font-weight: 700;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+            margin-bottom: 15px;
+        }
+        .launch-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(74, 222, 128, 0.3);
+        }
+        .instructions {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            line-height: 1.6;
+        }
+        .instructions ol {
+            text-align: left;
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        .instructions li {
+            margin-bottom: 5px;
+        }
+        .warning {
+            background: rgba(251, 191, 36, 0.15);
+            border: 1px solid rgba(251, 191, 36, 0.3);
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-size: 0.8rem;
+            color: #fbbf24;
+        }
+        .back-link {
+            margin-top: 20px;
+        }
+        .back-link a {
+            color: #60a5fa;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .back-link a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="server-icon">🖥️</div>
+        <h1>KVM Console</h1>
+        <div class="server-name">{{.ServerName}}</div>
+        <div class="bmc-type">
+            {{if eq .BMCType "idrac"}}Dell iDRAC
+            {{else if eq .BMCType "supermicro"}}Supermicro IPMI
+            {{else if eq .BMCType "ilo"}}HPE iLO
+            {{else}}Management Console
+            {{end}}
+        </div>
+
+        {{if .HasUsername}}
+        <div class="credentials-box">
+            <h3>Login Credentials</h3>
+            <div class="credential-row">
+                <div>
+                    <div class="credential-label">Username</div>
+                    <div class="credential-value" id="username">{{.Username}}</div>
+                </div>
+                <button class="copy-btn" onclick="copyToClipboard('{{.Username}}', this)">Copy</button>
+            </div>
+            <div class="credential-row">
+                <div>
+                    <div class="credential-label">Password</div>
+                    <div class="credential-value" id="password">••••••••</div>
+                </div>
+                <button class="copy-btn" onclick="copyToClipboard('{{.Password}}', this)">Copy</button>
+            </div>
+        </div>
+        {{end}}
+
+        <a href="{{.ConsoleURL}}" target="_blank" class="launch-btn" id="launchBtn">
+            🚀 Open Console
+        </a>
+
+        <div class="instructions">
+            <ol>
+                <li>Click <strong>Open Console</strong> above</li>
+                <li>Accept the SSL certificate warning if prompted</li>
+                <li>Use the <strong>Copy</strong> buttons to copy credentials</li>
+                <li>Paste into the BMC login form</li>
+            </ol>
+        </div>
+
+        <div class="warning">
+            <strong>Tip:</strong> If you see a certificate warning, click "Advanced" → "Proceed" to continue.
+            This is normal for self-signed BMC certificates.
+        </div>
+
+        <div class="back-link">
+            <a href="/">← Back to Server List</a>
+        </div>
+    </div>
+
+    <script>
+        function copyToClipboard(text, button) {
+            function showCopied() {
+                const originalText = button.textContent;
+                button.textContent = 'Copied!';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('copied');
+                }, 1500);
+            }
+
+            function legacyCopy(value) {
+                // Synchronous fallback using a temporary textarea +
+                // execCommand('copy'). MUST run inside the click handler
+                // (not from a Promise callback) or the browser will drop
+                // the operation for missing user activation.
+                const textarea = document.createElement('textarea');
+                textarea.value = value;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.top = '0';
+                textarea.style.left = '0';
+                textarea.style.width = '2em';
+                textarea.style.height = '2em';
+                textarea.style.padding = '0';
+                textarea.style.border = 'none';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                const previouslyFocused = document.activeElement;
+                textarea.focus();
+                textarea.select();
+                textarea.setSelectionRange(0, value.length); // iOS Safari
+                let ok = false;
+                try {
+                    ok = document.execCommand('copy');
+                } catch (e) {
+                    ok = false;
+                }
+                document.body.removeChild(textarea);
+                if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+                    previouslyFocused.focus();
+                }
+                return ok;
+            }
+
+            // navigator.clipboard is only available in secure contexts
+            // (HTTPS / localhost / file://). Lab manager is commonly served
+            // over plain HTTP on a LAN, so fall back to execCommand('copy')
+            // SYNCHRONOUSLY when the modern API is unavailable. Waiting for
+            // the writeText() Promise to reject would lose the user
+            // activation window and cause the copy to silently fail.
+            if (!window.isSecureContext || !navigator.clipboard || !navigator.clipboard.writeText) {
+                if (legacyCopy(text)) {
+                    showCopied();
+                } else {
+                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
+                }
+                return;
+            }
+
+            navigator.clipboard.writeText(text).then(showCopied, function () {
+                if (legacyCopy(text)) {
+                    showCopied();
+                } else {
+                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
+                }
+            });
+        }
+
+        // Auto-open console on page load (optional - uncomment to enable)
+        // window.addEventListener('load', () => {
+        //     document.getElementById('launchBtn').click();
+        // });
+    </script>
+</body>
+</html>

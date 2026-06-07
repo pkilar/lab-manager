@@ -1,37 +1,37 @@
-# Use Alpine Linux with Python 3.12
-FROM python:3.12-alpine
+# ---- build stage -----------------------------------------------------------
+# Pure-Go build (CGO disabled): modernc.org/sqlite needs no C toolchain, so the
+# result is a fully static binary with the templates and tzdata embedded.
+# Pinned to the BUILD platform so the compiler always runs natively and
+# cross-compiles to each TARGET arch — fast multi-arch builds with no emulation
+# of the toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
-# Set working directory
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /src
+
+# Cache module downloads separately from the source for faster rebuilds.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/lab-manager ./cmd/lab-manager
+
+# ---- runtime stage ---------------------------------------------------------
+# ipmitool is required for IPMI power control; ca-certificates for outbound TLS;
+# busybox wget (bundled in alpine) backs the compose/stack healthcheck.
+FROM alpine:3.21
+
+RUN apk add --no-cache ipmitool ca-certificates
+
 WORKDIR /app
+COPY --from=build /out/lab-manager /app/lab-manager
 
-# Install system dependencies
-# - ipmitool: Required for IPMI server management
-# - gcc, musl-dev, linux-headers: Build dependencies for Python packages
-RUN apk add --no-cache \
-    ipmitool \
-    gcc \
-    musl-dev \
-    linux-headers
-
-# Copy requirements first for better caching
-COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application files
-COPY app.py .
-COPY templates/ templates/
-
-# Create directory for SQLite database
+# Created here for non-volume runs; compose/stack bind- or named-mount over it.
 RUN mkdir -p /app/instance
 
-# Expose Flask port
 EXPOSE 5000
 
-# Set environment variables
-ENV FLASK_APP=app.py
-ENV PYTHONUNBUFFERED=1
-
-# Run the application
-CMD ["python", "app.py"]
+ENTRYPOINT ["/app/lab-manager"]

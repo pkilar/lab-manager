@@ -1,8 +1,8 @@
 .claude/
-.venv/
-__pycache__/
 instance/
-.fastembed_cache/
 
-# Local secrets — contains FLASK_SECRET_KEY (do not commit)
+# Local secrets — contains LAB_MANAGER_SECRET_KEY (do not commit)
 .env
+
+# Go build artifacts
+/lab-manager

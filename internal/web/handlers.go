@@ -1,0 +1,524 @@
+package web
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/pkilar/lab-manager/internal/console"
+	"github.com/pkilar/lab-manager/internal/model"
+	"github.com/pkilar/lab-manager/internal/secret"
+	"github.com/pkilar/lab-manager/internal/store"
+)
+
+// ---- shared helpers ------------------------------------------------------
+
+func pathID(r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
+func (a *App) serverError(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("ERROR: %s %s: %v", r.Method, r.URL.Path, err)
+	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+}
+
+func (a *App) notFoundOrError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	a.serverError(w, r, err)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func actionToCommand(action string) (string, bool) {
+	switch action {
+	case "start":
+		return "power on", true
+	case "stop":
+		return "power off", true
+	case "restart":
+		return "power cycle", true
+	default:
+		return "", false
+	}
+}
+
+// requestScheme reports the external scheme, honouring a reverse proxy's
+// X-Forwarded-Proto so console launch URLs and the Secure cookie flag are
+// correct behind Traefik.
+func requestScheme(r *http.Request) string {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return strings.ToLower(strings.TrimSpace(strings.Split(proto, ",")[0]))
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+// ---- web UI --------------------------------------------------------------
+
+func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
+	servers, err := a.store.AllServers()
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	rows := make([]serverRow, 0, len(servers))
+	for _, s := range servers {
+		row := serverRow{
+			ID:        s.ID,
+			Name:      s.Name,
+			IPAddress: s.IPAddress,
+			BMCType:   s.BMCType,
+			HasCreds:  s.RedfishUser != "" || s.IPMIUser != "",
+			HasMAC:    s.MACAddress != "",
+			Status:    s.Status,
+			StatusOn:  s.Status == "On",
+		}
+		if s.Notes != "" {
+			if rn := []rune(s.Notes); len(rn) > 50 {
+				row.NotesPreview = string(rn[:50])
+				row.NotesTruncated = true
+			} else {
+				row.NotesPreview = s.Notes
+			}
+		}
+		if !s.LastUpdated.IsZero() {
+			row.HasLastUpdated = true
+			row.LastUpdatedUTC = s.LastUpdated.UTC().Format("2006-01-02T15:04:05.000000")
+			row.LastUpdatedLocal = s.LastUpdated.Local().Format("2006-01-02 15:04:05 MST")
+		}
+		rows = append(rows, row)
+	}
+	a.renderPage(w, "index", http.StatusOK, indexData{baseData: a.baseData(r), Servers: rows})
+}
+
+func (a *App) handleNewServer(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		name := sanitizeServerName(r.PostFormValue("name"))
+		ip := strings.TrimSpace(r.PostFormValue("ip_address"))
+		mac := strings.TrimSpace(r.PostFormValue("mac_address"))
+
+		switch {
+		case name == "":
+			a.flashSimple(w, r, "new_server", "error", "Server name is required")
+			return
+		case !validateIPAddress(ip):
+			a.flashSimple(w, r, "new_server", "error", "Invalid IP address format")
+			return
+		case mac != "" && !validateMACAddress(mac):
+			a.flashSimple(w, r, "new_server", "error", "Invalid MAC address format (use AA:BB:CC:DD:EE:FF)")
+			return
+		}
+
+		bmc := r.PostFormValue("bmc_type")
+		if !model.ValidBMCType(bmc) {
+			bmc = model.BMCGeneric
+		}
+		s := &model.Server{
+			Name:            name,
+			IPAddress:       ip,
+			BMCType:         bmc,
+			RedfishUser:     r.PostFormValue("redfish_user"),
+			RedfishPassword: r.PostFormValue("redfish_password"),
+			IPMIUser:        r.PostFormValue("ipmi_user"),
+			IPMIPassword:    r.PostFormValue("ipmi_password"),
+			MACAddress:      mac,
+			Status:          "Off",
+			LastUpdated:     time.Now().UTC(),
+			Notes:           r.PostFormValue("notes"),
+		}
+		if err := a.store.CreateServer(s); err != nil {
+			a.serverError(w, r, err)
+			return
+		}
+		requestSession(r).flash("success", "Server added successfully!")
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	a.renderPage(w, "new_server", http.StatusOK, simplePage{a.baseData(r)})
+}
+
+func (a *App) handleEditServer(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s, err := a.store.GetServer(id)
+	if err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		name := sanitizeServerName(r.PostFormValue("name"))
+		ip := strings.TrimSpace(r.PostFormValue("ip_address"))
+		mac := strings.TrimSpace(r.PostFormValue("mac_address"))
+
+		switch {
+		case name == "":
+			a.editError(w, r, s, "Server name is required")
+			return
+		case !validateIPAddress(ip):
+			a.editError(w, r, s, "Invalid IP address format")
+			return
+		case mac != "" && !validateMACAddress(mac):
+			a.editError(w, r, s, "Invalid MAC address format (use AA:BB:CC:DD:EE:FF)")
+			return
+		}
+
+		bmc := r.PostFormValue("bmc_type")
+		if !model.ValidBMCType(bmc) {
+			bmc = model.BMCGeneric
+		}
+		s.Name = name
+		s.IPAddress = ip
+		s.BMCType = bmc
+		s.RedfishUser = r.PostFormValue("redfish_user")
+		s.IPMIUser = r.PostFormValue("ipmi_user")
+		s.MACAddress = mac
+		s.Notes = r.PostFormValue("notes")
+		s.LastUpdated = time.Now().UTC()
+
+		newRedfish := r.PostFormValue("redfish_password")
+		newIPMI := r.PostFormValue("ipmi_password")
+		setRedfish := newRedfish != ""
+		setIPMI := newIPMI != ""
+		if setRedfish {
+			s.RedfishPassword = newRedfish
+		}
+		if setIPMI {
+			s.IPMIPassword = newIPMI
+		}
+		if err := a.store.UpdateServer(s, setRedfish, setIPMI); err != nil {
+			a.serverError(w, r, err)
+			return
+		}
+		requestSession(r).flash("success", "Server updated successfully!")
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	a.renderEdit(w, r, s)
+}
+
+func (a *App) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := a.store.GetServer(id); err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	if err := a.store.DeleteServer(id); err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	requestSession(r).flash("success", "Server deleted successfully!")
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (a *App) handlePowerAction(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s, err := a.store.GetServer(id)
+	if err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	action := r.PathValue("action")
+	command, ok := actionToCommand(action)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid action"})
+		return
+	}
+	success, message := a.power.Send(s, command)
+	if success {
+		requestSession(r).flash("success", fmt.Sprintf("Server %s %sed successfully!", s.Name, action))
+	} else {
+		requestSession(r).flash("error", "Error: "+message)
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (a *App) handleWakeOnLAN(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s, err := a.store.GetServer(id)
+	if err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	if !a.wolEnabled {
+		requestSession(r).flash("error", "Wake-on-LAN is disabled. Set WOL_ENABLED=true to enable it.")
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	if s.MACAddress == "" {
+		requestSession(r).flash("error", fmt.Sprintf("Server %s does not have a MAC address configured for Wake-on-LAN", s.Name))
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	success, message := a.power.Send(s, "power on")
+	if success {
+		requestSession(r).flash("success", fmt.Sprintf("Wake-on-LAN packet sent to %s", s.Name))
+	} else {
+		requestSession(r).flash("error", "Error: "+message)
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (a *App) handleCheckAllServers(w http.ResponseWriter, r *http.Request) {
+	servers, err := a.store.AllServers()
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	for _, s := range servers {
+		a.power.CheckStatus(s)
+	}
+	requestSession(r).flash("success", fmt.Sprintf("Successfully updated status for all %d servers", len(servers)))
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// ---- JSON API ------------------------------------------------------------
+
+func (a *App) handleAPIPowerAction(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s, err := a.store.GetServer(id)
+	if err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	action := r.PathValue("action")
+	command, ok := actionToCommand(action)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid action"})
+		return
+	}
+	success, message := a.power.Send(s, command)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":   success,
+		"message":   message,
+		"server_id": id,
+		"action":    action,
+	})
+}
+
+func (a *App) handleAPICheckStatus(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s, err := a.store.GetServer(id)
+	if err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	status := a.power.CheckStatus(s)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": status, "server_id": id})
+}
+
+// ---- console -------------------------------------------------------------
+
+func (a *App) handleServerConsole(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s, err := a.store.GetServer(id)
+	if err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	if s.RedfishUser == "" && s.IPMIUser == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success":      false,
+			"error":        "No credentials configured for this server",
+			"fallback_url": "https://" + s.IPAddress + "/",
+		})
+		return
+	}
+	token := a.console.GenerateToken(id, currentUser(r).ID)
+	launchURL := requestScheme(r) + "://" + r.Host + "/server/" + strconv.FormatInt(id, 10) +
+		"/console/launch?token=" + url.QueryEscape(token)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":        true,
+		"auto_login_url": launchURL,
+		"server_name":    s.Name,
+		"bmc_type":       s.BMCType,
+		"expires_in":     console.TokenValiditySeconds,
+	})
+}
+
+func (a *App) handleConsoleLaunch(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		requestSession(r).flash("error", "Invalid console access request - missing token")
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	if !a.console.VerifyToken(token, id, currentUser(r).ID) {
+		requestSession(r).flash("error", "Console access token expired or invalid. Please try again.")
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	s, err := a.store.GetServer(id)
+	if err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	cfg := console.LoginConfigFor(s)
+	if cfg == nil {
+		requestSession(r).flash("error", "No credentials configured for this server")
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	username, password := console.CredsFor(s)
+
+	switch {
+	case s.BMCType == model.BMCSupermicro && cfg.SupportsAutoLogin:
+		a.renderConsole(w, "console_launch_supermicro", consoleSupermicroData{
+			ServerName: s.Name, IPAddress: s.IPAddress,
+			LoginURL: cfg.LoginURL, ConsoleURL: cfg.ConsoleURL,
+			Username: username, Password: password, HasUsername: username != "",
+		})
+	case s.BMCType == model.BMCIDRAC && cfg.SupportsAutoLogin:
+		a.renderConsole(w, "console_launch_idrac", consoleIdracData{
+			ServerID: s.ID, ServerName: s.Name, IPAddress: s.IPAddress, ConsoleURL: cfg.ConsoleURL,
+			Username: username, Password: password, HasUsername: username != "",
+			Auth: a.console.PreAuthenticateIDRAC(s),
+		})
+	default:
+		a.renderConsole(w, "console_launch", consoleGenericData{
+			ServerName: s.Name, BMCType: s.BMCType, ConsoleURL: cfg.ConsoleURL,
+			Username: username, Password: password, HasUsername: username != "",
+		})
+	}
+}
+
+// ---- auth ----------------------------------------------------------------
+
+func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		username := strings.TrimSpace(r.PostFormValue("username"))
+		password := r.PostFormValue("password")
+
+		user, err := a.store.GetUserByUsername(username)
+		if err == nil && secret.CheckPasswordHash(user.PasswordHash, password) {
+			sess := requestSession(r)
+			sess.setUID(user.ID)
+			if user.PasswordChangeRequired {
+				sess.flash("warning", "Please change your default password for security.")
+				http.Redirect(w, r, "/change-password", http.StatusFound)
+				return
+			}
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		requestSession(r).flash("error", "Invalid username or password")
+	}
+	a.renderPage(w, "login", http.StatusOK, simplePage{a.baseData(r)})
+}
+
+func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	if r.Method == http.MethodPost {
+		current := r.PostFormValue("current_password")
+		newPassword := r.PostFormValue("new_password")
+		confirm := r.PostFormValue("confirm_password")
+
+		switch {
+		case !secret.CheckPasswordHash(user.PasswordHash, current):
+			a.flashSimple(w, r, "change_password", "error", "Current password is incorrect")
+			return
+		case len([]rune(newPassword)) < 8:
+			a.flashSimple(w, r, "change_password", "error", "New password must be at least 8 characters long")
+			return
+		case newPassword != confirm:
+			a.flashSimple(w, r, "change_password", "error", "New passwords do not match")
+			return
+		case newPassword == current:
+			a.flashSimple(w, r, "change_password", "error", "New password must be different from current password")
+			return
+		}
+
+		hash, err := secret.GeneratePasswordHash(newPassword)
+		if err != nil {
+			a.serverError(w, r, err)
+			return
+		}
+		if err := a.store.SetUserPassword(user.ID, hash, false); err != nil {
+			a.serverError(w, r, err)
+			return
+		}
+		requestSession(r).flash("success", "Password changed successfully!")
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	a.renderPage(w, "change_password", http.StatusOK, simplePage{a.baseData(r)})
+}
+
+func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
+	requestSession(r).logout()
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+// ---- render helpers ------------------------------------------------------
+
+func (a *App) flashSimple(w http.ResponseWriter, r *http.Request, page, category, message string) {
+	requestSession(r).flash(category, message)
+	a.renderPage(w, page, http.StatusOK, simplePage{a.baseData(r)})
+}
+
+func (a *App) renderEdit(w http.ResponseWriter, r *http.Request, s *model.Server) {
+	a.renderPage(w, "edit_server", http.StatusOK, editData{
+		baseData: a.baseData(r),
+		Server: editServerRow{
+			ID: s.ID, Name: s.Name, IPAddress: s.IPAddress, BMCType: s.BMCType,
+			RedfishUser: s.RedfishUser, IPMIUser: s.IPMIUser, MACAddress: s.MACAddress, Notes: s.Notes,
+			HasRedfishUser: s.RedfishUser != "", HasIPMIUser: s.IPMIUser != "",
+		},
+	})
+}
+
+func (a *App) editError(w http.ResponseWriter, r *http.Request, s *model.Server, message string) {
+	requestSession(r).flash("error", message)
+	a.renderEdit(w, r, s)
+}

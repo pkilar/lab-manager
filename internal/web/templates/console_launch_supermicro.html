@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Console - {{.ServerName}}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            padding: 20px;
+        }
+        .container {
+            text-align: center;
+            padding: 30px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            width: 100%;
+        }
+        .server-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
+        h1 {
+            font-size: 1.3rem;
+            margin-bottom: 5px;
+            color: #4ade80;
+        }
+        .server-name {
+            font-size: 1.1rem;
+            color: #60a5fa;
+            margin-bottom: 20px;
+        }
+        .bmc-type {
+            display: inline-block;
+            padding: 4px 12px;
+            background: rgba(96, 165, 250, 0.2);
+            border-radius: 20px;
+            font-size: 0.8rem;
+            color: #60a5fa;
+            margin-bottom: 20px;
+        }
+        .status-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+        .status-message {
+            font-size: 1rem;
+            margin-bottom: 15px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #4ade80;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .error-box {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .error-box h3 {
+            color: #ef4444;
+            margin-bottom: 10px;
+        }
+        .error-box p {
+            font-size: 0.9rem;
+            color: #fca5a5;
+        }
+        .manual-login {
+            display: none;
+            margin-top: 20px;
+        }
+        .credentials-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: left;
+        }
+        .credentials-box h3 {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .credential-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+        }
+        .credential-row:last-child {
+            margin-bottom: 0;
+        }
+        .credential-label {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            margin-bottom: 2px;
+        }
+        .credential-value {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 1rem;
+            color: #fff;
+        }
+        .copy-btn {
+            padding: 6px 12px;
+            background: #4ade80;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .copy-btn:hover {
+            background: #22c55e;
+        }
+        .copy-btn.copied {
+            background: #60a5fa;
+        }
+        .launch-btn {
+            display: block;
+            width: 100%;
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+            color: #1a1a2e;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            font-weight: 700;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+        }
+        .launch-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(74, 222, 128, 0.3);
+        }
+        .retry-btn {
+            display: inline-block;
+            padding: 12px 25px;
+            background: #60a5fa;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+            margin-right: 10px;
+        }
+        .retry-btn:hover {
+            background: #3b82f6;
+        }
+        .back-link {
+            margin-top: 20px;
+        }
+        .back-link a {
+            color: #60a5fa;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .back-link a:hover {
+            text-decoration: underline;
+        }
+        .info-text {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-top: 15px;
+        }
+        /* Hidden iframe for login */
+        #loginFrame {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="server-icon">🖥️</div>
+        <h1>KVM Console</h1>
+        <div class="server-name">{{.ServerName}}</div>
+        <div class="bmc-type">Supermicro IPMI</div>
+
+        <!-- Status during auto-login -->
+        <div class="status-box" id="statusBox">
+            <div class="spinner" id="spinner"></div>
+            <div class="status-message" id="statusMessage">Connecting to BMC...</div>
+            <p class="info-text">Authenticating with Supermicro IPMI interface</p>
+        </div>
+
+        <!-- Error display -->
+        <div class="error-box" id="errorBox">
+            <h3>Auto-Login Failed</h3>
+            <p id="errorMessage">Unable to automatically log in. Please use manual login below.</p>
+        </div>
+
+        <!-- Manual login fallback -->
+        <div class="manual-login" id="manualLogin">
+            {{if .HasUsername}}
+            <div class="credentials-box">
+                <h3>Login Credentials</h3>
+                <div class="credential-row">
+                    <div>
+                        <div class="credential-label">Username</div>
+                        <div class="credential-value">{{.Username}}</div>
+                    </div>
+                    <button class="copy-btn" onclick="copyToClipboard('{{.Username}}', this)">Copy</button>
+                </div>
+                <div class="credential-row">
+                    <div>
+                        <div class="credential-label">Password</div>
+                        <div class="credential-value">••••••••</div>
+                    </div>
+                    <button class="copy-btn" onclick="copyToClipboard('{{.Password}}', this)">Copy</button>
+                </div>
+            </div>
+            {{end}}
+            <a href="{{.ConsoleURL}}" target="_blank" class="launch-btn">
+                Open Console Manually
+            </a>
+        </div>
+
+        <div class="back-link">
+            <a href="/">← Back to Server List</a>
+        </div>
+    </div>
+
+    <!-- Hidden iframe for login process -->
+    <iframe id="loginFrame" name="loginFrame"></iframe>
+
+    <!-- Hidden form for BMC login -->
+    <form id="loginForm" method="POST" action="{{.LoginURL}}" target="loginFrame" style="display: none;">
+        <input type="hidden" name="name" value="{{.Username}}">
+        <input type="hidden" name="pwd" value="{{.Password}}">
+    </form>
+
+    <script>
+        const BMC_IP = {{js .IPAddress}};
+        const CONSOLE_URL = {{js .ConsoleURL}};
+        const LOGIN_URL = {{js .LoginURL}};
+
+        let loginAttempted = false;
+        let loginTimeout = null;
+
+        function updateStatus(message) {
+            document.getElementById('statusMessage').textContent = message;
+        }
+
+        function showError(message) {
+            document.getElementById('statusBox').style.display = 'none';
+            document.getElementById('errorBox').style.display = 'block';
+            document.getElementById('errorMessage').textContent = message;
+            document.getElementById('manualLogin').style.display = 'block';
+        }
+
+        function showManualLogin() {
+            document.getElementById('statusBox').style.display = 'none';
+            document.getElementById('manualLogin').style.display = 'block';
+        }
+
+        function copyToClipboard(text, button) {
+            function showCopied() {
+                const originalText = button.textContent;
+                button.textContent = 'Copied!';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('copied');
+                }, 1500);
+            }
+
+            function legacyCopy(value) {
+                // Synchronous fallback using a temporary textarea +
+                // execCommand('copy'). MUST run inside the click handler
+                // (not from a Promise callback) or the browser will drop
+                // the operation for missing user activation.
+                const textarea = document.createElement('textarea');
+                textarea.value = value;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.top = '0';
+                textarea.style.left = '0';
+                textarea.style.width = '2em';
+                textarea.style.height = '2em';
+                textarea.style.padding = '0';
+                textarea.style.border = 'none';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                const previouslyFocused = document.activeElement;
+                textarea.focus();
+                textarea.select();
+                textarea.setSelectionRange(0, value.length); // iOS Safari
+                let ok = false;
+                try {
+                    ok = document.execCommand('copy');
+                } catch (e) {
+                    ok = false;
+                }
+                document.body.removeChild(textarea);
+                if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+                    previouslyFocused.focus();
+                }
+                return ok;
+            }
+
+            // navigator.clipboard is only available in secure contexts
+            // (HTTPS / localhost / file://). Lab manager is commonly served
+            // over plain HTTP on a LAN, so fall back to execCommand('copy')
+            // SYNCHRONOUSLY when the modern API is unavailable. Waiting for
+            // the writeText() Promise to reject would lose the user
+            // activation window and cause the copy to silently fail.
+            if (!window.isSecureContext || !navigator.clipboard || !navigator.clipboard.writeText) {
+                if (legacyCopy(text)) {
+                    showCopied();
+                } else {
+                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
+                }
+                return;
+            }
+
+            navigator.clipboard.writeText(text).then(showCopied, function () {
+                if (legacyCopy(text)) {
+                    showCopied();
+                } else {
+                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
+                }
+            });
+        }
+
+        function attemptLogin() {
+            if (loginAttempted) return;
+            loginAttempted = true;
+
+            updateStatus('Authenticating...');
+
+            // Set a timeout - if login takes too long, show manual option
+            loginTimeout = setTimeout(() => {
+                showError('Login timed out. The BMC may be slow to respond or unreachable.');
+            }, 15000);
+
+            // Submit the login form to the hidden iframe
+            const form = document.getElementById('loginForm');
+            const iframe = document.getElementById('loginFrame');
+
+            // Listen for iframe load (indicates login response received)
+            iframe.onload = function() {
+                clearTimeout(loginTimeout);
+
+                // Give a brief moment for cookies to be set
+                setTimeout(() => {
+                    updateStatus('Login successful! Opening console...');
+
+                    // Open the console in a new window
+                    // The browser should now have the session cookie from the iframe login
+                    setTimeout(() => {
+                        window.open(CONSOLE_URL, '_blank');
+                        showManualLogin();
+                        document.getElementById('statusBox').style.display = 'block';
+                        document.getElementById('statusMessage').textContent = 'Console opened in new window';
+                        document.getElementById('spinner').style.display = 'none';
+                    }, 500);
+                }, 500);
+            };
+
+            iframe.onerror = function() {
+                clearTimeout(loginTimeout);
+                showError('Failed to connect to BMC. Please check network connectivity.');
+            };
+
+            // Submit the form
+            try {
+                form.submit();
+            } catch (e) {
+                clearTimeout(loginTimeout);
+                showError('Failed to submit login form: ' + e.message);
+            }
+        }
+
+        // Direct window navigation approach with console redirect
+        // Opens login in new window, then redirects to console after authentication
+        function attemptDirectLogin() {
+            updateStatus('Opening BMC interface...');
+
+            // Open a named window first
+            const bmcWindow = window.open('about:blank', 'supermicro_bmc');
+
+            if (!bmcWindow) {
+                showError('Pop-up blocked! Please allow pop-ups for this site and try again.');
+                return;
+            }
+
+            // Create a form that submits to the named window
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = LOGIN_URL;
+            form.target = 'supermicro_bmc';
+
+            // Add credentials
+            const nameInput = document.createElement('input');
+            nameInput.type = 'hidden';
+            nameInput.name = 'name';
+            nameInput.value = {{js .Username}};
+            form.appendChild(nameInput);
+
+            const pwdInput = document.createElement('input');
+            pwdInput.type = 'hidden';
+            pwdInput.name = 'pwd';
+            pwdInput.value = {{js .Password}};
+            form.appendChild(pwdInput);
+
+            document.body.appendChild(form);
+            form.submit();
+            document.body.removeChild(form);
+
+            updateStatus('Authenticating...');
+
+            // After login completes, redirect to console
+            setTimeout(() => {
+                updateStatus('Redirecting to console...');
+
+                // Navigate the BMC window to the console URL
+                try {
+                    bmcWindow.location.href = CONSOLE_URL;
+                } catch (e) {
+                    // If we can't access the window (cross-origin), just open console
+                    window.open(CONSOLE_URL, 'supermicro_bmc');
+                }
+
+                setTimeout(() => {
+                    updateStatus('Console opened');
+                    document.getElementById('spinner').style.display = 'none';
+
+                    // Update info text with a link to console
+                    const statusBox = document.getElementById('statusBox');
+                    const infoText = statusBox.querySelector('.info-text');
+
+                    // Clear existing content
+                    while (infoText.firstChild) {
+                        infoText.removeChild(infoText.firstChild);
+                    }
+
+                    // Add text node
+                    infoText.appendChild(document.createTextNode('Console should be open in the BMC window. '));
+
+                    // Add link using safe DOM methods
+                    const consoleLink = document.createElement('a');
+                    consoleLink.href = CONSOLE_URL;
+                    consoleLink.target = 'supermicro_bmc';
+                    consoleLink.style.color = '#4ade80';
+                    consoleLink.style.textDecoration = 'underline';
+                    consoleLink.textContent = 'Click here to open console';
+                    infoText.appendChild(consoleLink);
+
+                    infoText.appendChild(document.createTextNode(' if it did not open automatically.'));
+
+                    showManualLogin();
+                }, 1500);
+            }, 2000);
+        }
+
+        // Start auto-login process on page load
+        window.addEventListener('load', () => {
+            attemptDirectLogin();
+        });
+    </script>
+</body>
+</html>

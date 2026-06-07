@@ -1,18 +1,12 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-dist/
-build/
+# Build artifacts / binaries
+lab-manager
+/out/
 
-# Virtual Environment
-.venv/
-venv/
-ENV/
-env/
+# Go test files are not needed in the image (go build ignores them anyway)
+*_test.go
+
+# Local secrets — never copy into the build context
+.env
 
 # IDEs
 .vscode/
@@ -21,21 +15,22 @@ env/
 *.swo
 *~
 
-# Git
+# Git / local tooling caches (kept out of the build context)
 .git/
 .gitignore
-.fastembed_cache
+.claude/
 
-# Database (will be mounted as volume)
+# Database (mounted as a volume at runtime)
 instance/
 
 # Documentation
 CLAUDE.md
 README.md
 
-# Docker
+# Docker / compose (not needed inside the image)
 Dockerfile
 docker-compose.yml
+docker-stack.yml
 .dockerignore
 
 # OS

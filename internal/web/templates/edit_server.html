@@ -1,0 +1,72 @@
+{{define "title"}}Edit Server - Home Lab Server Manager{{end}}
+
+{{define "content"}}
+<div style="max-width: 600px; margin: 0 auto;">
+    <h2 style="margin-bottom: 20px;">Edit Server: {{.Server.Name}}</h2>
+    <div class="servers-table">
+        <div style="padding: 20px; background-color: white;">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+                <div class="form-group">
+                    <label for="name">Server Name *</label>
+                    <input type="text" id="name" name="name" value="{{.Server.Name}}" required maxlength="100">
+                </div>
+                <div class="form-group">
+                    <label for="ip_address">IP Address *</label>
+                    <input type="text" id="ip_address" name="ip_address" value="{{.Server.IPAddress}}" required>
+                </div>
+                <div class="form-group">
+                    <label for="bmc_type">BMC Type</label>
+                    <select id="bmc_type" name="bmc_type">
+                        <option value="generic" {{if or (eq .Server.BMCType "generic") (not .Server.BMCType)}}selected{{end}}>Generic/Other</option>
+                        <option value="idrac" {{if eq .Server.BMCType "idrac"}}selected{{end}}>Dell iDRAC</option>
+                        <option value="supermicro" {{if eq .Server.BMCType "supermicro"}}selected{{end}}>Supermicro IPMI</option>
+                        <option value="ilo" {{if eq .Server.BMCType "ilo"}}selected{{end}}>HPE iLO</option>
+                    </select>
+                    <small style="color: #666;">Select BMC type for automatic console login</small>
+                </div>
+                <div class="form-group">
+                    <label for="redfish_user">Redfish Username</label>
+                    <input type="text" id="redfish_user" name="redfish_user" value="{{.Server.RedfishUser}}">
+                </div>
+                <div class="form-group">
+                    <label for="redfish_password">Redfish Password</label>
+                    <input type="password" id="redfish_password" name="redfish_password"
+                        placeholder="{{if .Server.HasRedfishUser}}(leave blank to keep current){{end}}">
+                    {{if .Server.HasRedfishUser}}
+                    <small style="color: #666;">Leave blank to keep existing password</small>
+                    {{end}}
+                </div>
+                <div class="form-group">
+                    <label for="ipmi_user">IPMI Username</label>
+                    <input type="text" id="ipmi_user" name="ipmi_user" value="{{.Server.IPMIUser}}">
+                </div>
+                <div class="form-group">
+                    <label for="ipmi_password">IPMI Password</label>
+                    <input type="password" id="ipmi_password" name="ipmi_password"
+                        placeholder="{{if .Server.HasIPMIUser}}(leave blank to keep current){{end}}">
+                    {{if .Server.HasIPMIUser}}
+                    <small style="color: #666;">Leave blank to keep existing password</small>
+                    {{end}}
+                </div>
+                <div class="form-group">
+                    <label for="mac_address">MAC Address (for Wake-on-LAN)</label>
+                    <input type="text" id="mac_address" name="mac_address" value="{{.Server.MACAddress}}" placeholder="AA:BB:CC:DD:EE:FF">
+                    {{if not .WolEnabled}}
+                    <small style="color: #666;">Wake-on-LAN is currently disabled (set <code>WOL_ENABLED=true</code> to enable). The stored MAC is kept but not used until then.</small>
+                    {{end}}
+                </div>
+                <div class="form-group">
+                    <label for="notes">Notes</label>
+                    <textarea id="notes" name="notes"
+                        placeholder="Additional notes about this server">{{.Server.Notes}}</textarea>
+                </div>
+                <div class="form-actions">
+                    <a href="/" class="btn btn-back">Cancel</a>
+                    <button type="submit" class="btn btn-primary">Update Server</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{{end}}

@@ -28,17 +28,17 @@ fi
 # Ensure instance directory exists so the bind mount doesn't get created as root.
 mkdir -p instance
 
-# Generate a FLASK_SECRET_KEY on first run and persist it to .env so restarts
-# keep existing sessions valid. SECRET_KEY is optional per app.py, but setting
-# one is recommended for anything beyond local development.
+# Generate a LAB_MANAGER_SECRET_KEY on first run and persist it to .env so restarts
+# keep existing sessions valid. SECRET_KEY is optional (the app generates a
+# random key if unset), but setting one is recommended beyond local development.
 if [[ ! -f .env ]]; then
-    if command -v python3 >/dev/null 2>&1; then
-        SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-        printf 'FLASK_SECRET_KEY=%s\n' "$SECRET_KEY" > .env
+    if command -v openssl >/dev/null 2>&1; then
+        SECRET_KEY="$(openssl rand -hex 32)"
+        printf 'LAB_MANAGER_SECRET_KEY=%s\n' "$SECRET_KEY" > .env
         chmod 600 .env
-        echo "Created .env with a generated FLASK_SECRET_KEY."
+        echo "Created .env with a generated LAB_MANAGER_SECRET_KEY."
     else
-        echo "Warning: python3 not found; skipping FLASK_SECRET_KEY generation." >&2
+        echo "Warning: openssl not found; skipping LAB_MANAGER_SECRET_KEY generation." >&2
     fi
 fi
 

@@ -8,15 +8,12 @@ services:
       # Persist SQLite database and encryption key
       - ./instance:/app/instance
     environment:
-      # IMPORTANT: Set these in production! Read from the environment or .env file.
-      # Generate SECRET_KEY with: python -c "import secrets; print(secrets.token_hex(32))"
+      # Session-cookie signing key. Generate with: openssl rand -hex 32
       # Optional: if empty, the app generates a random key per boot (sessions won't persist).
-      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-}
-      # Generate ENCRYPTION_KEY with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      # NOTE: If not set, a key will be auto-generated and saved to instance/.encryption_key
-      - FLASK_ENCRYPTION_KEY=${FLASK_ENCRYPTION_KEY:-}
-      - FLASK_ENV=${FLASK_ENV:-production}
-      - FLASK_DEBUG=${FLASK_DEBUG:-false}
+      - LAB_MANAGER_SECRET_KEY=${LAB_MANAGER_SECRET_KEY:-}
+      # Fernet key for encrypting stored credentials. If empty, a key is
+      # auto-generated and saved to instance/.encryption_key.
+      - LAB_MANAGER_ENCRYPTION_KEY=${LAB_MANAGER_ENCRYPTION_KEY:-}
       # Wake-on-LAN is OFF by default. Requires host networking to work (already
       # set above via network_mode: host). See README "Wake-on-LAN".
       - WOL_ENABLED=${WOL_ENABLED:-false}
