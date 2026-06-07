@@ -8,9 +8,9 @@
 #
 # Why this is separate from docker-compose.yml:
 #   `docker stack deploy` IGNORES build:, container_name:, network_mode:, and
-#   restart:. So Swarm never builds (it pulls the image from the registry), host
-#   networking is provided via the external `host` network instead of
-#   network_mode, and restart/update behavior lives under `deploy:`.
+#   restart:. So Swarm never builds (it pulls the image from the registry),
+#   Traefik routing is wired via deploy.labels + the traefik-public overlay
+#   (see below), and restart/update behavior lives under `deploy:`.
 version: "3.8"
 
 services:
@@ -19,12 +19,12 @@ services:
     # For reproducible rollouts, pin to an immutable tag instead of :latest, e.g.
     #   image: registry.home.kilar.net/lab-manager:<git-short-sha>
 
-    # Host networking is REQUIRED for Wake-on-LAN: magic packets are L2 broadcasts
-    # and won't leave an overlay network. Swarm ignores `network_mode: host`, so we
-    # attach to the pre-existing `host` network (declared external below). The app
-    # is then reachable directly on the node's port 5000 (no routing-mesh publish).
+    # Joined to the shared `traefik-public` overlay so Traefik's swarm provider can
+    # route to it (see deploy.labels below). NOTE: this replaces the old host-network
+    # setup — Wake-on-LAN can no longer work here, since magic packets are L2
+    # broadcasts that won't leave an overlay (WoL needs `network_mode: host`).
     networks:
-      - hostnet
+      - traefik-public
 
     environment:
       # Persisted session key. Supplied at `docker stack deploy` time from the
@@ -37,7 +37,8 @@ services:
       - FLASK_ENCRYPTION_KEY=${FLASK_ENCRYPTION_KEY:-}
       - FLASK_ENV=${FLASK_ENV:-production}
       - FLASK_DEBUG=${FLASK_DEBUG:-false}
-      # Wake-on-LAN is OFF by default. It requires the host network above to work.
+      # Wake-on-LAN is OFF by default. It does NOT work under this overlay-networked
+      # deploy (magic packets need host networking); leave it false here.
       - WOL_ENABLED=${WOL_ENABLED:-false}
 
     volumes:
@@ -55,6 +56,16 @@ services:
       start_period: 15s
 
     deploy:
+      # Traefik's swarm provider reads these labels to publish the app at
+      # https://lab.pi.home.kilar.net. The cluster's default TLS cert is the
+      # Let's Encrypt wildcard *.pi.home.kilar.net, so `tls=true` alone yields a
+      # valid cert — no per-router certresolver needed.
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.lab-manager.rule=Host(`lab.pi.home.kilar.net`)"
+        - "traefik.http.routers.lab-manager.entrypoints=websecure"
+        - "traefik.http.routers.lab-manager.tls=true"
+        - "traefik.http.services.lab-manager.loadbalancer.server.port=5000"
       # SQLite has no concurrent-write safety: run exactly ONE task, pinned to one
       # node so the data volume is always the same physical volume.
       replicas: 1
@@ -84,11 +95,12 @@ services:
           cpus: "0.10"
 
 networks:
-  # Docker's built-in `host` network exists on every node; declaring it external
-  # attaches this service to host networking (required for Wake-on-LAN broadcast).
-  hostnet:
+  # Shared overlay created by the Traefik stack (pi-cluster-ansible). Declared
+  # external so this stack joins it instead of creating its own; Traefik's swarm
+  # provider only routes to services attached to this network.
+  traefik-public:
     external: true
-    name: host
+    name: traefik-public
 
 volumes:
   lab_manager_instance:

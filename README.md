@@ -94,8 +94,13 @@ docker-compose up -d
 
 For Docker Swarm, deploy with `docker-stack.yml` instead of `docker-compose.yml`
 (Swarm ignores `build:`, `container_name:`, `network_mode:`, and `restart:`). The
-stack pulls the image from the registry, uses the `host` network so Wake-on-LAN
-broadcasts work, and runs a single node-pinned replica (SQLite is single-writer).
+stack pulls the image from the registry, joins the shared `traefik-public` overlay
+so Traefik publishes it over HTTPS, and runs a single node-pinned replica (SQLite is
+single-writer). The bundled `deploy.labels` route the host `lab.pi.home.kilar.net`
+(change the router rule for your own hostname); the cluster's Let's Encrypt wildcard
+provides the cert, so no per-router cert config is needed. **Because it's on an
+overlay rather than host networking, Wake-on-LAN does not work in this deploy** — see
+[Wake-on-LAN](#wake-on-lan-opt-in).
 
 ```bash
 # Label the node that should hold the data volume (one time):
@@ -132,9 +137,12 @@ server won't wake:
 2. **Host networking** — magic packets are L2 broadcasts, so the container must
    share the host's network rather than a bridged/NAT network:
    - **Docker Compose**: already set via `network_mode: host` in `docker-compose.yml`.
-   - **Docker Swarm**: `network_mode` is ignored by `docker stack deploy`; attach the
-     service to the external `host` network instead (a `networks:` entry with
-     `external: true` and `name: host`).
+   - **Docker Swarm**: the shipped `docker-stack.yml` is on the `traefik-public`
+     overlay (for Traefik routing), so WoL is **not** available there. To use WoL on
+     Swarm, swap that overlay for the external `host` network (a `networks:` entry
+     with `external: true` and `name: host`) and drop the Traefik `deploy.labels` —
+     then route to it via Traefik's file provider pointing at the node's `IP:5000`,
+     since the swarm provider can't reach a host-networked service.
 3. **Same broadcast domain** — the host running this app must be on the **same L2
    subnet/VLAN** as the target. The app broadcasts to `255.255.255.255` on UDP ports
    9 and 7, plus the target's `/24` subnet broadcast on port 9; routers don't forward
