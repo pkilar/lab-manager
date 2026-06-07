@@ -1,0 +1,95 @@
+# Docker Swarm stack for Home Lab Server Manager.
+#
+# Deploy:
+#   docker stack deploy -c docker-stack.yml --with-registry-auth lab-manager
+#
+# --with-registry-auth is REQUIRED so worker nodes receive the credentials to
+# pull from the private registry (registry.home.kilar.net).
+#
+# Why this is separate from docker-compose.yml:
+#   `docker stack deploy` IGNORES build:, container_name:, network_mode:, and
+#   restart:. So Swarm never builds (it pulls the image from the registry), host
+#   networking is provided via the external `host` network instead of
+#   network_mode, and restart/update behavior lives under `deploy:`.
+version: "3.8"
+
+services:
+  lab-manager:
+    image: registry.home.kilar.net/lab-manager:latest
+    # For reproducible rollouts, pin to an immutable tag instead of :latest, e.g.
+    #   image: registry.home.kilar.net/lab-manager:<git-short-sha>
+
+    # Host networking is REQUIRED for Wake-on-LAN: magic packets are L2 broadcasts
+    # and won't leave an overlay network. Swarm ignores `network_mode: host`, so we
+    # attach to the pre-existing `host` network (declared external below). The app
+    # is then reachable directly on the node's port 5000 (no routing-mesh publish).
+    networks:
+      - hostnet
+
+    environment:
+      # Persisted session key. Supplied at `docker stack deploy` time from the
+      # shell/.env; if empty the app generates a random key per start (sessions
+      # won't survive a restart). Recommended to set one.
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-}
+      # Fernet key for stored credentials. If empty, one is generated and saved to
+      # the data volume (instance/.encryption_key). Changing it makes existing
+      # encrypted credentials unreadable.
+      - FLASK_ENCRYPTION_KEY=${FLASK_ENCRYPTION_KEY:-}
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - FLASK_DEBUG=${FLASK_DEBUG:-false}
+      # Wake-on-LAN is OFF by default. It requires the host network above to work.
+      - WOL_ENABLED=${WOL_ENABLED:-false}
+
+    volumes:
+      # SQLite DB + encryption key. A named volume keeps the data on the pinned
+      # node (see placement constraint). To inspect the DB, find it under the
+      # volume's mountpoint: `docker volume inspect lab-manager_lab_manager_instance`.
+      - lab_manager_instance:/app/instance
+
+    healthcheck:
+      # /login is unauthenticated and returns 200; busybox wget ships in the image.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5000/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    deploy:
+      # SQLite has no concurrent-write safety: run exactly ONE task, pinned to one
+      # node so the data volume is always the same physical volume.
+      replicas: 1
+      placement:
+        constraints:
+          # Pin to a specific data node. Label it once before first deploy:
+          #   docker node update --label-add lab_manager_data=true <node-name>
+          # (Alternative for a single-manager swarm: node.role == manager)
+          - node.labels.lab_manager_data == true
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        # stop-first prevents two tasks writing the SQLite DB at once during an
+        # update — the Swarm equivalent of Kubernetes' Recreate strategy.
+        order: stop-first
+        parallelism: 1
+      rollback_config:
+        order: stop-first
+        parallelism: 1
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.50"
+        reservations:
+          memory: 128M
+          cpus: "0.10"
+
+networks:
+  # Docker's built-in `host` network exists on every node; declaring it external
+  # attaches this service to host networking (required for Wake-on-LAN broadcast).
+  hostnet:
+    external: true
+    name: host
+
+volumes:
+  lab_manager_instance:
+    driver: local
