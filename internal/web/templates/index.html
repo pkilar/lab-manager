@@ -67,6 +67,10 @@
                             onclick="openConsole({{.ID}}, '{{.Name}}')">
                             Console
                         </button>
+                        {{if .HasCreds}}
+                        <a href="/server/{{.ID}}/sol/launch" target="_blank" rel="noopener"
+                            class="btn btn-info btn-sm" title="IPMI Serial-over-LAN console">📟 Serial</a>
+                        {{end}}
                         <a href="/server/{{.ID}}/edit"
                             class="btn btn-secondary btn-sm">Edit</a>
                         <form method="POST" action="/server/{{.ID}}/delete"
