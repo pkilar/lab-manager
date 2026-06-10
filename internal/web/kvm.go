@@ -1,7 +1,7 @@
 package web
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/pkilar/lab-manager/internal/model"
@@ -34,7 +34,7 @@ func (a *App) handleKVM(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	log.Printf("KVM proxy launch: user=%d server=%d", currentUser(r).ID, id)
+	slog.Info("KVM proxy launch", "user_id", currentUser(r).ID, "server_id", id)
 	token := a.proxy.MintToken(id)
 	http.Redirect(w, r, a.proxy.AuthURL(id, token), http.StatusFound)
 }

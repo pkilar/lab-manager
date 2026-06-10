@@ -61,3 +61,35 @@ func TestKVMInitiatorRedirectsToProxySubdomain(t *testing.T) {
 		t.Fatalf("KVM initiator Location = %q", loc)
 	}
 }
+
+// TestHostDispatchRoutesProxyAndApp locks the Host-dispatch boundary: a proxy
+// Host reaches the proxy (which bounces unauthenticated relays back to the
+// initiator), while a normal Host never reaches the proxy's reserved path.
+func TestHostDispatchRoutesProxyAndApp(t *testing.T) {
+	srv, c := proxyTestServer(t)
+
+	// Proxy Host, no proxy session → proxy.Handler relays → bounce to initiator.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/protected", nil)
+	req.Host = "idrac-1.pi.home.kilar.net"
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound ||
+		resp.Header.Get("Location") != "https://lab.pi.home.kilar.net/server/1/kvm" {
+		t.Fatalf("proxy-host dispatch: status=%d loc=%q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	// Normal (non-proxy) Host hitting the proxy's reserved path → app mux 404;
+	// the proxy is never reached.
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/__labmgr/auth?token=x", nil)
+	resp2, err := c.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("normal-host /__labmgr/auth: status=%d, want 404", resp2.StatusCode)
+	}
+}
