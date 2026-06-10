@@ -1,0 +1,111 @@
+package bmcproxy
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/pkilar/lab-manager/internal/model"
+)
+
+// proxyFront fronts m.Handler, letting the test set the proxy Host header.
+func proxyFront(t *testing.T, m *Manager) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(m.Handler))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func noRedirect() *http.Client {
+	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
+func TestHandshakeLogsInAndSetsSession(t *testing.T) {
+	idrac := newFakeIDRAC(t)
+	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac), RedfishUser: "root", RedfishPassword: "calvin"}}, []byte("s"), "pi.home.kilar.net")
+	front := proxyFront(t, m)
+
+	tok := m.MintToken(1)
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/__labmgr/auth?token="+tok, nil)
+	req.Host = "idrac-1.pi.home.kilar.net"
+	resp, err := noRedirect().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status=%d, want 302", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/index.html?ST1=aaa,ST2=bbb" {
+		t.Fatalf("Location = %q", loc)
+	}
+	var sid string
+	for _, c := range resp.Cookies() {
+		if c.Name == proxyCookieName {
+			sid = c.Value
+		}
+	}
+	if sid == "" {
+		t.Fatal("no bmcproxy cookie set")
+	}
+	sess, ok := m.sessions.get(sid)
+	if !ok || sess.serverID != 1 || sess.idracCookie != "-http-session-="+idracSessionValue {
+		t.Fatalf("session not stored correctly: %+v ok=%v", sess, ok)
+	}
+}
+
+func TestHandshakeBadTokenBounces(t *testing.T) {
+	idrac := newFakeIDRAC(t)
+	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}}, []byte("s"), "pi.home.kilar.net")
+	front := proxyFront(t, m)
+
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/__labmgr/auth?token=bad", nil)
+	req.Host = "idrac-1.pi.home.kilar.net"
+	resp, err := noRedirect().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound ||
+		resp.Header.Get("Location") != "https://lab.pi.home.kilar.net/server/1/kvm" {
+		t.Fatalf("bad token: status=%d loc=%q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+func TestHandlerRejectsUnknownHost(t *testing.T) {
+	m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+	front := proxyFront(t, m)
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/", nil)
+	req.Host = "lab.pi.home.kilar.net" // not a proxy host
+	resp, err := noRedirect().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("non-proxy host status=%d, want 404", resp.StatusCode)
+	}
+}
+
+func TestHandshakeLoginFailureShowsError(t *testing.T) {
+	idrac := newFakeIDRAC(t)
+	// Wrong creds so the fake's /data/login returns authResult 5.
+	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac), RedfishUser: "root", RedfishPassword: "wrong"}}, []byte("s"), "pi.home.kilar.net")
+	front := proxyFront(t, m)
+	tok := m.MintToken(1)
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/__labmgr/auth?token="+tok, nil)
+	req.Host = "idrac-1.pi.home.kilar.net"
+	resp, err := noRedirect().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("login failure status=%d, want 502", resp.StatusCode)
+	}
+	if !strings.Contains(readAll(t, resp), "iDRAC login failed") {
+		t.Fatal("error page missing reason")
+	}
+}

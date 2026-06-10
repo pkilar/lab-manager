@@ -2,6 +2,7 @@ package bmcproxy
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"net"
 	"net/http"
@@ -217,4 +218,73 @@ func (m *Manager) rewriteSetCookies(resp *http.Response, sid string) {
 	for _, line := range out {
 		resp.Header.Add("Set-Cookie", line)
 	}
+}
+
+// Handler serves one request on a proxy host: the auth handshake, or a relay.
+func (m *Manager) Handler(w http.ResponseWriter, r *http.Request) {
+	id, ok := m.HostServerID(r.Host)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Path == "/__labmgr/auth" {
+		m.handleAuth(w, r, id)
+		return
+	}
+	m.relay(w, r, id)
+}
+
+// handleAuth verifies the handshake token, logs into the iDRAC server-side,
+// stores the session, sets the opaque proxy cookie, and redirects the browser
+// to the SPA forward URL.
+func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
+	if !verifyToken(m.secret, r.URL.Query().Get("token"), id) {
+		// Bounce through the login-gated initiator to re-mint.
+		http.Redirect(w, r, m.appBaseURL()+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
+		return
+	}
+	s, err := m.lookup.GetServer(id)
+	if err != nil || s.BMCType != model.BMCIDRAC {
+		http.NotFound(w, r)
+		return
+	}
+	user, pass := s.RedfishUser, s.RedfishPassword
+	if user == "" {
+		user, pass = s.IPMIUser, s.IPMIPassword
+	}
+	if user == "" {
+		m.errorPage(w, "No credentials configured for this server")
+		return
+	}
+	cookie, forwardURL, err := idracLogin(r.Context(), s.IPAddress, user, pass)
+	if err != nil {
+		log.Printf("ERROR: bmcproxy iDRAC login (server %d): %v", id, err)
+		m.errorPage(w, err.Error())
+		return
+	}
+	sid, err := m.sessions.create(id, cookie)
+	if err != nil {
+		m.errorPage(w, "internal error")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     proxyCookieName,
+		Value:    sid,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(w, r, "/"+strings.TrimPrefix(forwardURL, "/"), http.StatusFound)
+}
+
+func (m *Manager) errorPage(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusBadGateway)
+	fmt.Fprintf(w,
+		`<!doctype html><meta charset="utf-8"><title>iDRAC proxy</title>`+
+			`<body style="font-family:sans-serif;background:#1a1a2e;color:#fff;padding:40px">`+
+			`<h2 style="color:#ef4444">Could not open iDRAC</h2><p>%s</p>`+
+			`<p><a style="color:#60a5fa" href="%s/">&larr; Back to lab-manager</a></p>`,
+		html.EscapeString(msg), html.EscapeString(m.appBaseURL()))
 }
