@@ -37,6 +37,9 @@ func (a *App) routes() *http.ServeMux {
 	mux.HandleFunc("GET /server/{id}/sol/launch", a.requireLogin(true, a.handleSOLLaunch))
 	mux.HandleFunc("GET /server/{id}/sol", a.requireLogin(true, a.handleSOLSocket))
 
+	// iDRAC KVM proxy initiator (no-op when the proxy is disabled).
+	mux.HandleFunc("GET /server/{id}/kvm", a.requireLogin(true, a.handleKVM))
+
 	// Static assets (vendored xterm.js); not sensitive, no auth needed.
 	mux.Handle("GET /static/", staticHandler())
 

@@ -128,6 +128,7 @@ type serverRow struct {
 	IPAddress        string
 	BMCType          string
 	HasCreds         bool
+	KVMEnabled       bool
 	HasMAC           bool
 	Status           string
 	StatusOn         bool

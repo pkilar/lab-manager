@@ -153,14 +153,15 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	rows := make([]serverRow, 0, len(servers))
 	for _, s := range servers {
 		row := serverRow{
-			ID:        s.ID,
-			Name:      s.Name,
-			IPAddress: s.IPAddress,
-			BMCType:   s.BMCType,
-			HasCreds:  s.RedfishUser != "" || s.IPMIUser != "",
-			HasMAC:    s.MACAddress != "",
-			Status:    s.Status,
-			StatusOn:  s.Status == "On",
+			ID:         s.ID,
+			Name:       s.Name,
+			IPAddress:  s.IPAddress,
+			BMCType:    s.BMCType,
+			HasCreds:   s.RedfishUser != "" || s.IPMIUser != "",
+			KVMEnabled: a.proxy.Enabled() && s.BMCType == model.BMCIDRAC,
+			HasMAC:     s.MACAddress != "",
+			Status:     s.Status,
+			StatusOn:   s.Status == "On",
 		}
 		if s.Notes != "" {
 			if rn := []rune(s.Notes); len(rn) > 50 {

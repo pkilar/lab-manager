@@ -39,7 +39,7 @@ func testServer(t *testing.T) (*httptest.Server, *http.Client, *store.Store) {
 		t.Fatalf("InitDefaultUser: %v", err)
 	}
 
-	app, err := New(st, []byte("integration-secret"), false)
+	app, err := New(st, []byte("integration-secret"), false, "")
 	if err != nil {
 		t.Fatalf("web.New: %v", err)
 	}

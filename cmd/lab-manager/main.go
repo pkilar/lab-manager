@@ -68,7 +68,8 @@ func run() error {
 	}
 
 	wolEnabled := envBool("WOL_ENABLED", false)
-	app, err := web.New(st, secretKey, wolEnabled)
+	bmcProxyDomain := os.Getenv("LAB_MANAGER_BMC_PROXY_DOMAIN")
+	app, err := web.New(st, secretKey, wolEnabled, bmcProxyDomain)
 	if err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("lab-manager listening", "addr", ":5000", "wol_enabled", wolEnabled)
+		slog.Info("lab-manager listening", "addr", ":5000", "wol_enabled", wolEnabled, "bmc_proxy_domain", bmcProxyDomain)
 		serveErr <- srv.ListenAndServe()
 	}()
 
