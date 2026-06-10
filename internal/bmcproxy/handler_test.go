@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pkilar/lab-manager/internal/model"
 )
@@ -74,6 +75,45 @@ func TestSafeForwardPathBlocksOpenRedirect(t *testing.T) {
 		if got := safeForwardPath(c.in); got != c.want {
 			t.Errorf("safeForwardPath(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestLogoutIDRACReleasesSession(t *testing.T) {
+	idrac := newFakeIDRAC(t)
+	m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+	m.logoutIDRAC(hostport(idrac), "-http-session-="+idracSessionValue)
+	if idrac.logoutCount() != 1 {
+		t.Fatalf("logoutIDRAC should call /data/logout once, got %d", idrac.logoutCount())
+	}
+}
+
+func TestHandshakeLogsOutPriorSession(t *testing.T) {
+	idrac := newFakeIDRAC(t)
+	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac), RedfishUser: "root", RedfishPassword: "calvin"}}, []byte("s"), "pi.home.kilar.net")
+	front := proxyFront(t, m)
+
+	// Two handshakes for the same server: the second must log the first iDRAC
+	// web session out so launches don't pile up on the iDRAC session table.
+	for i := range 2 {
+		tok := m.MintToken(1)
+		req, _ := http.NewRequest(http.MethodGet, front.URL+"/__labmgr/auth?token="+tok, nil)
+		req.Host = "idrac-1.pi.home.kilar.net"
+		resp, err := noRedirect().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("handshake %d status=%d, want 302", i, resp.StatusCode)
+		}
+	}
+
+	// The displaced logout fires in a goroutine; poll briefly for it.
+	for i := 0; i < 100 && idrac.logoutCount() == 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if idrac.logoutCount() != 1 {
+		t.Fatalf("second handshake should log out the first session exactly once, got %d", idrac.logoutCount())
 	}
 }
 

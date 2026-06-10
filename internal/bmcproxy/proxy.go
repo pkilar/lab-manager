@@ -1,6 +1,7 @@
 package bmcproxy
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"log"
@@ -47,8 +48,32 @@ func (m *Manager) sessionGC() {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for range t.C {
-		m.sessions.gc()
+		for _, sess := range m.sessions.gc() {
+			m.logoutIDRAC(sess.ip, sess.idracCookie)
+		}
 	}
+}
+
+// logoutIDRAC releases an iDRAC web session (-http-session-) so repeated KVM
+// launches don't exhaust the iDRAC's small web-session table. Best-effort: runs
+// on its own background deadline so it completes even when the originating
+// request is gone.
+func (m *Manager) logoutIDRAC(ip, idracCookie string) {
+	if ip == "" || idracCookie == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+ip+"/data/logout", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Cookie", idracCookie)
+	resp, err := loginClient.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 // Enabled reports whether the proxy feature is configured.
@@ -262,11 +287,16 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 		m.errorPage(w, err.Error())
 		return
 	}
-	sid, err := m.sessions.create(id, cookie)
+	sid, displaced, err := m.sessions.create(id, s.IPAddress, cookie)
 	if err != nil {
 		log.Printf("ERROR: bmcproxy session create (server %d): %v", id, err)
 		m.errorPage(w, "internal error")
 		return
+	}
+	// Log out any prior iDRAC session for this server so repeated launches
+	// don't pile up on the iDRAC's small web-session table.
+	for _, d := range displaced {
+		go m.logoutIDRAC(d.ip, d.idracCookie)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     proxyCookieName,

@@ -13,9 +13,11 @@ const sessionTTL = 8 * time.Hour
 
 // proxySession is the server-side state behind one opaque bmcproxy cookie. It
 // holds the iDRAC session token to inject upstream — that token is never sent
-// to the browser.
+// to the browser. ip is retained so the session can be logged out of the iDRAC
+// when it is evicted.
 type proxySession struct {
 	serverID    int64
+	ip          string
 	idracCookie string // "-http-session-=..." Cookie header value
 	expiry      time.Time
 }
@@ -30,15 +32,25 @@ func newSessionStore() *sessionStore {
 	return &sessionStore{sessions: map[string]*proxySession{}, now: time.Now}
 }
 
-func (s *sessionStore) create(serverID int64, idracCookie string) (string, error) {
-	id, err := randomID()
+// create stores a new session and returns it, plus any prior sessions for the
+// SAME server (now removed) so the caller can log them out of the iDRAC. This
+// caps iDRAC web sessions at ~one per server, so repeated KVM launches don't
+// exhaust the iDRAC's small web-session table.
+func (s *sessionStore) create(serverID int64, ip, idracCookie string) (id string, displaced []*proxySession, err error) {
+	id, err = randomID()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	s.mu.Lock()
-	s.sessions[id] = &proxySession{serverID: serverID, idracCookie: idracCookie, expiry: s.now().Add(sessionTTL)}
-	s.mu.Unlock()
-	return id, nil
+	defer s.mu.Unlock()
+	for oldID, sess := range s.sessions {
+		if sess.serverID == serverID {
+			displaced = append(displaced, sess)
+			delete(s.sessions, oldID)
+		}
+	}
+	s.sessions[id] = &proxySession{serverID: serverID, ip: ip, idracCookie: idracCookie, expiry: s.now().Add(sessionTTL)}
+	return id, displaced, nil
 }
 
 func (s *sessionStore) get(id string) (*proxySession, bool) {
@@ -65,15 +77,20 @@ func (s *sessionStore) updateCookie(id, idracCookie string) {
 	}
 }
 
-func (s *sessionStore) gc() {
+// gc removes expired sessions and returns them so the caller can log them out
+// of the iDRAC.
+func (s *sessionStore) gc() []*proxySession {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
+	var evicted []*proxySession
 	for id, sess := range s.sessions {
 		if now.After(sess.expiry) {
+			evicted = append(evicted, sess)
 			delete(s.sessions, id)
 		}
 	}
+	return evicted
 }
 
 func randomID() (string, error) {

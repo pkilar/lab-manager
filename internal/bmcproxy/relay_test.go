@@ -18,7 +18,7 @@ func relayServer(t *testing.T) (*httptest.Server, *Manager, string) {
 	t.Helper()
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}}, []byte("s"), "pi.home.kilar.net")
-	sid, err := m.sessions.create(1, "-http-session-="+idracSessionValue)
+	sid, _, err := m.sessions.create(1, hostport(idrac), "-http-session-="+idracSessionValue)
 	if err != nil {
 		t.Fatal(err)
 	}
