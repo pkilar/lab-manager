@@ -47,7 +47,7 @@ func parseTemplates() (*Templates, error) {
 		}
 		t.pages[name] = tmpl
 	}
-	for _, name := range []string{"console_launch", "console_launch_idrac", "console_launch_supermicro"} {
+	for _, name := range []string{"console_launch", "console_launch_idrac", "console_launch_supermicro", "console_sol"} {
 		tmpl, err := template.New(name+".html").Funcs(templateFuncs).ParseFS(templateFS, "templates/"+name+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse console %s: %w", name, err)
@@ -186,4 +186,9 @@ type consoleIdracData struct {
 	Password    string
 	HasUsername bool
 	Auth        console.IDRACAuthResult
+}
+
+type consoleSOLData struct {
+	ServerID   int64
+	ServerName string
 }

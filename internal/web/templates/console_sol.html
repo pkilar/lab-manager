@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serial Console - {{.ServerName}}</title>
+    <link rel="stylesheet" href="/static/xterm/xterm.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; background: #000; }
+        .bar {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            color: #cbd5e1; background: #16213e; padding: 8px 12px;
+            display: flex; align-items: center; gap: 12px; font-size: 0.9rem;
+        }
+        .bar .name { color: #60a5fa; font-weight: 600; }
+        .bar .state { margin-left: auto; font-size: 0.8rem; color: #94a3b8; }
+        .bar a { color: #60a5fa; text-decoration: none; }
+        #term { height: calc(100vh - 37px); width: 100%; padding: 4px; }
+    </style>
+</head>
+<body>
+    <div class="bar">
+        <span>📟 Serial Console</span>
+        <span class="name">{{.ServerName}}</span>
+        <span class="state" id="state">connecting…</span>
+        <a href="/">← Back</a>
+    </div>
+    <div id="term"></div>
+
+    <script src="/static/xterm/xterm.js"></script>
+    <script src="/static/xterm/addon-fit.js"></script>
+    <script>
+        const ID = {{.ServerID}};
+        const term = new Terminal({ cursorBlink: true, fontSize: 14, convertEol: false });
+        const fit = new FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(document.getElementById('term'));
+        fit.fit();
+        window.addEventListener('resize', () => fit.fit());
+
+        const state = document.getElementById('state');
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = new WebSocket(proto + '://' + location.host + '/server/' + ID + '/sol');
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            state.textContent = 'connected';
+            term.writeln('\x1b[90mConnected. If the screen stays blank, ensure the host has BIOS serial console redirection enabled. Press Enter.\x1b[0m');
+            term.focus();
+        };
+        ws.onmessage = (ev) => {
+            const data = typeof ev.data === 'string' ? ev.data : new Uint8Array(ev.data);
+            term.write(data);
+        };
+        ws.onclose = () => { state.textContent = 'disconnected'; term.writeln('\r\n\x1b[91m[ session closed ]\x1b[0m'); };
+        ws.onerror = () => { state.textContent = 'error'; };
+
+        term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+    </script>
+</body>
+</html>
