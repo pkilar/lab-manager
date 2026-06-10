@@ -141,6 +141,9 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 			}
 			keep = append(keep, idracCookie)
 			req.Header.Set("Cookie", strings.Join(keep, "; "))
+			// Don't leak the browser's IP to the BMC. Setting the header to nil
+			// tells ReverseProxy to omit X-Forwarded-For (Del is re-added).
+			req.Header["X-Forwarded-For"] = nil
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rewriteLocation(resp, ip, r.Host, proxyScheme(r))
@@ -155,9 +158,14 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 	rp.ServeHTTP(w, r)
 }
 
-// proxyScheme returns the scheme the browser used to reach the proxy.
+// proxyScheme returns the scheme the browser used to reach the proxy, honoring
+// the X-Forwarded-Proto set by Traefik (which may be a comma list). Mirrors the
+// web package's requestScheme.
 func proxyScheme(r *http.Request) string {
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return strings.ToLower(strings.TrimSpace(strings.Split(proto, ",")[0]))
+	}
+	if r.TLS != nil {
 		return "https"
 	}
 	return "http"
@@ -174,7 +182,9 @@ func rewriteLocation(resp *http.Response, ip, proxyHost, scheme string) {
 	if err != nil {
 		return
 	}
-	if u.Host == ip {
+	// Compare on hostname so a redirect to https://<ip>:443/... (common from
+	// iDRAC) is matched even though ip may itself carry a port (in tests).
+	if u.Hostname() == stripPort(ip) {
 		u.Scheme = scheme
 		u.Host = proxyHost
 		resp.Header.Set("Location", u.String())

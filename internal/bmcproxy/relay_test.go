@@ -124,6 +124,26 @@ func TestRelayTunnelsWebSocket(t *testing.T) {
 	}
 }
 
+func TestRewriteLocationHandlesPortAndScope(t *testing.T) {
+	cases := []struct {
+		loc, ip, want string
+	}{
+		{"https://10.0.0.5/login", "10.0.0.5", "https://idrac-1.example/login"},
+		{"https://10.0.0.5:443/login", "10.0.0.5", "https://idrac-1.example/login"},     // iDRAC :443 redirect
+		{"https://10.0.0.5:443/login", "10.0.0.5:443", "https://idrac-1.example/login"}, // ip carries port (test-like)
+		{"/relative/path", "10.0.0.5", "/relative/path"},                                // relative: untouched
+		{"https://other.example/x", "10.0.0.5", "https://other.example/x"},              // foreign host: untouched
+	}
+	for _, c := range cases {
+		resp := &http.Response{Header: http.Header{}}
+		resp.Header.Set("Location", c.loc)
+		rewriteLocation(resp, c.ip, "idrac-1.example", "https")
+		if got := resp.Header.Get("Location"); got != c.want {
+			t.Errorf("rewriteLocation(%q, ip=%q) = %q, want %q", c.loc, c.ip, got, c.want)
+		}
+	}
+}
+
 func readAll(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	var sb strings.Builder
