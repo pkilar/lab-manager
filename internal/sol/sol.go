@@ -76,7 +76,6 @@ type Session struct {
 	stdinW    *io.PipeWriter
 	closeOnce sync.Once
 	done      chan struct{}
-	err       error
 }
 
 // Start clears any stale BMC payload, then runs `sol activate`. The returned
@@ -100,15 +99,19 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 	go func() {
 		// Clear a possibly-leaked prior payload (single-session per BMC).
 		_ = m.run.Run(ctx, deactivateArgs(s.IPAddress, user), env, nil, io.Discard)
-		// Run the console until ctx is cancelled or ipmitool exits.
-		runErr := m.run.Run(ctx, activateArgs(s.IPAddress, user), env, inR, outW)
+		// Run the console until ctx is cancelled or ipmitool exits. The exit
+		// error is intentionally discarded: a normal disconnect kills ipmitool
+		// (signal: killed), which is not a failure, and stderr is already
+		// streamed to the terminal.
+		_ = m.run.Run(ctx, activateArgs(s.IPAddress, user), env, inR, outW)
 		// Release the BMC payload even though ctx is now (usually) cancelled.
 		cleanupCtx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		_ = m.run.Run(cleanupCtx, deactivateArgs(s.IPAddress, user), env, nil, io.Discard)
 		ccancel()
-		_ = outW.CloseWithError(io.EOF) // EOF to Output reader
+		_ = outW.CloseWithError(io.EOF) // EOF to the Output reader
+		// Also close stdin: if ipmitool exited on its own (no Close() yet), this
+		// makes a pending browser write fail instead of blocking forever.
 		_ = inW.Close()
-		sess.err = runErr
 		close(sess.done)
 	}()
 

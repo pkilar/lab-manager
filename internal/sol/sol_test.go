@@ -71,19 +71,12 @@ func (f *fakeRunner) Run(ctx context.Context, args, env []string, stdin io.Reade
 		f.deactivations.Add(1)
 		return nil
 	}
-	if stdin != nil { // activate: echo until stdin closes (Session.Close) or ctx done
+	// activate: echo stdin->stdout until stdin closes (Session.Close). The fake
+	// ignores ctx; the real execRunner is cancelled via exec.CommandContext.
+	if stdin != nil {
 		_, _ = io.Copy(stdout, stdin)
 	}
 	return nil
-}
-
-func envHas(env []string, kv string) bool {
-	for _, e := range env {
-		if e == kv {
-			return true
-		}
-	}
-	return false
 }
 
 func TestSessionBridgesIOAndDeactivatesOnClose(t *testing.T) {
@@ -122,7 +115,7 @@ func TestSessionBridgesIOAndDeactivatesOnClose(t *testing.T) {
 
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
-	if !envHas(fr.lastEnv, "IPMI_PASSWORD=calvin") {
+	if !slices.Contains(fr.lastEnv, "IPMI_PASSWORD=calvin") {
 		t.Fatal("IPMI_PASSWORD not passed in env")
 	}
 	if strings.Contains(strings.Join(fr.lastArgs, " "), "calvin") {
