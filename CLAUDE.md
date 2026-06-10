@@ -54,11 +54,18 @@ LAB_MANAGER_ENCRYPTION_KEY="..."
 # Wake-on-LAN feature flag — OFF by default (accepts true/1/yes/on). Requires host
 # networking to actually wake hosts; see "Wake-on-LAN" below and the README.
 WOL_ENABLED=false
+
+# iDRAC KVM reverse-proxy base domain — UNSET by default (feature off). When set
+# (e.g. "pi.home.kilar.net") the app also answers idrac-<id>.<domain> and shows a
+# "KVM" button on iDRAC rows that auto-logs into the iDRAC web UI. Swarm/Traefik
+# only: needs the idrac-* Traefik router (docker-stack.yml) + wildcard DNS + the
+# *.pi cert. Does nothing in the host-networked docker-compose deploy.
+LAB_MANAGER_BMC_PROXY_DOMAIN=""
 ```
 
 ## Architecture
 
-A standard `cmd/` + `internal/` Go layout. The entry point is `cmd/lab-manager/main.go`; everything else lives in `internal/` packages with an acyclic dependency graph (`model` ← `secret` ← `store` ← `power`/`console`/`sol` ← `web` ← `cmd`). HTML is embedded; the only static assets are the vendored xterm.js files under `internal/web/static/` (embedded via `//go:embed`, served at `/static/`).
+A standard `cmd/` + `internal/` Go layout. The entry point is `cmd/lab-manager/main.go`; everything else lives in `internal/` packages with an acyclic dependency graph (`model` ← `secret` ← `store` ← `power`/`console`/`sol`/`bmcproxy` ← `web` ← `cmd`). HTML is embedded; the only static assets are the vendored xterm.js files under `internal/web/static/` (embedded via `//go:embed`, served at `/static/`).
 
 Packages:
 - **`cmd/lab-manager`** (`package main`) — config loading, wiring (cipher → store+migrations+seed → `web.New`), and the `http.Server` (`:5000`).
@@ -68,7 +75,8 @@ Packages:
 - **`internal/power`** — `Controller` for Redfish / IPMI / Wake-on-LAN power control and live status checks (persists status via the store).
 - **`internal/console`** — `Manager` for console access tokens, plus per-vendor BMC login config and the iDRAC server-side credential pre-flight.
 - **`internal/sol`** — IPMI Serial-over-LAN session manager: resolves creds (IPMI, else Redfish), runs `ipmitool ... sol activate` via an injectable runner (password via `IPMI_PASSWORD` env, never argv), and exposes a `Session` (`Stdin`/`Output`) the web layer bridges to a browser xterm.js terminal. `Start` deactivates first to clear a stale single-session payload; `Close` cancels and deactivates so the BMC payload is always released.
-- **`internal/web`** — the HTTP layer: `App` (holds the store + `power.Controller` + `console.Manager` + `sol.Manager` + templates), routing (`routes.go`), handlers (incl. `sol.go`: the SOL launch page + WebSocket bridge), sessions/CSRF (`session.go`), validation (`validate.go`), template rendering + view models (`render.go`), and the embedded static assets (`static.go`). The embedded templates live in `internal/web/templates/`. `App.New` builds the services; `App.Handler` is the `withSession → withCSRF → routes` chain.
+- **`internal/bmcproxy`** — iDRAC KVM auto-login reverse proxy. Serves `idrac-<id>.<domain>` hosts: a signed-token handshake does a server-side `/data/login`, holds the iDRAC `-http-session-` cookie in an in-memory session store keyed by an opaque `bmcproxy` cookie, and injects it upstream so the browser never sees it. A single `httputil.ReverseProxy` (TLS-skip transport) relays HTTP **and** the KVM WebSocket; `ModifyResponse` rewrites `Location` (port-aware) and captures/strips iDRAC `Set-Cookie`. `forwardURL` is reduced to a same-origin path (open-redirect guard). Depends only on `model` (via a `ServerLookup` interface satisfied by the store). Feature-flagged by `LAB_MANAGER_BMC_PROXY_DOMAIN`; Swarm/Traefik-only.
+- **`internal/web`** — the HTTP layer: `App` (holds the store + `power.Controller` + `console.Manager` + `sol.Manager` + `bmcproxy.Manager` + templates), routing (`routes.go`), handlers (incl. `sol.go`: the SOL launch page + WebSocket bridge; `kvm.go`: the KVM proxy initiator), sessions/CSRF (`session.go`), validation (`validate.go`), template rendering + view models (`render.go`), and the embedded static assets (`static.go`). The embedded templates live in `internal/web/templates/`. `App.New` builds the services; `App.Handler` is a Host dispatch — `idrac-<id>.<domain>` hosts go straight to `bmcproxy.Manager` (no app middleware), everything else through the `securityHeaders → limitRequestBody → withSession → withCSRF → routes` chain.
 
 Cross-cutting behavior:
 
@@ -109,6 +117,7 @@ The most involved feature; understanding it requires reading several functions i
 - **Console**: `/server/<id>/console`, `/server/<id>/console/launch`
 - **Serial console (SOL)**: `/server/<id>/sol/launch` (xterm.js page), `/server/<id>/sol` (WebSocket; same-origin session auth + `Origin` check, gorilla/websocket)
 - **Static**: `/static/...` (embedded vendored xterm.js; no auth)
+- **iDRAC KVM proxy** (when `LAB_MANAGER_BMC_PROXY_DOMAIN` set): `/server/<id>/kvm` (login-gated initiator on the main host → mints a token, 302 to the subdomain) and, on `idrac-<id>.<domain>`, `/__labmgr/auth` (handshake) + transparent relay of everything else to the iDRAC
 - **Auth**: `/login`, `/logout`, `/change-password`
 
 Routes are registered with Go 1.22+ method+wildcard patterns (e.g. `POST /server/{id}/power/{action}`, `GET /{$}` for the exact index). All routes except `/login` require authentication via the `requireLogin` wrapper; non-integer ids 404.
@@ -132,7 +141,7 @@ Go `html/template`, embedded from `internal/web/templates/` via `//go:embed`. Th
 
 ### Docker Swarm (primary)
 
-`docker-stack.yml` is the Swarm-native deploy file (`docker stack deploy -c docker-stack.yml --with-registry-auth lab-manager`). **This is how the app is actually deployed** (there are no Kubernetes manifests in this repo). Swarm **ignores** `build:`, `container_name:`, `network_mode:`, and `restart:`, so the stack: pulls the image from `registry.home.kilar.net` (never builds), joins the shared external `traefik-public` overlay so Traefik's swarm provider publishes it at `https://lab.pi.home.kilar.net` (via `deploy.labels`; default TLS cert is the cluster's LE wildcard `*.pi.home.kilar.net`), runs a single replica pinned to a labeled node with `update_config: order: stop-first` (SQLite is single-writer — the Recreate equivalent), and persists data in the `lab_manager_instance` named volume. **Trade-off**: because it's on an overlay rather than host networking, Wake-on-LAN does **not** work in the Swarm deploy (WoL needs host networking — that path stays available in `docker-compose.yml`). The Traefik model lives in `~/Devel/pi-cluster-ansible` (swarm provider reads `deploy.labels` from services on `traefik-public`; `whoami` is the registration template).
+`docker-stack.yml` is the Swarm-native deploy file (`docker stack deploy -c docker-stack.yml --with-registry-auth lab-manager`). **This is how the app is actually deployed** (there are no Kubernetes manifests in this repo). Swarm **ignores** `build:`, `container_name:`, `network_mode:`, and `restart:`, so the stack: pulls the image from `registry.home.kilar.net` (never builds), joins the shared external `traefik-public` overlay so Traefik's swarm provider publishes it at `https://lab.pi.home.kilar.net` (via `deploy.labels`; default TLS cert is the cluster's LE wildcard `*.pi.home.kilar.net`), runs a single replica pinned to a labeled node with `update_config: order: stop-first` (SQLite is single-writer — the Recreate equivalent), and persists data in the `lab_manager_instance` named volume. **Trade-off**: because it's on an overlay rather than host networking, Wake-on-LAN does **not** work in the Swarm deploy (WoL needs host networking — that path stays available in `docker-compose.yml`). Conversely, the **iDRAC KVM reverse proxy is Swarm-only** (the inverse of WoL): it needs Traefik + the `idrac-*` router + `LAB_MANAGER_BMC_PROXY_DOMAIN`, so it does nothing in the host-networked compose deploy. The Traefik model lives in `~/Devel/pi-cluster-ansible` (swarm provider reads `deploy.labels` from services on `traefik-public`; `whoami` is the registration template).
 
 ## Protocol Implementation Notes
 

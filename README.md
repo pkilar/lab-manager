@@ -79,6 +79,10 @@ LAB_MANAGER_ENCRYPTION_KEY=...
 
 # Wake-on-LAN feature toggle (disabled by default). See "Wake-on-LAN" below.
 WOL_ENABLED=false
+
+# iDRAC KVM reverse-proxy base domain (disabled by default). See "iDRAC KVM
+# auto-login" below. Swarm/Traefik deploy only.
+LAB_MANAGER_BMC_PROXY_DOMAIN=
 ```
 
 ### Production Deployment
@@ -167,6 +171,37 @@ docker-compose logs -f
 ```
 
 Each server with a MAC address gets an explicit **WoL** button (when the feature is enabled) you can use to send a packet on demand and watch the result in the logs.
+
+### iDRAC KVM auto-login (opt-in)
+
+By default, the **Console** button for an iDRAC opens the iDRAC login page and hands
+you the verified credentials to paste — true one-click auto-login isn't possible
+across origins. When you enable the **KVM reverse proxy**, an extra **KVM** button
+appears on iDRAC rows that logs you straight into the iDRAC web UI (and its HTML5
+Virtual Console) with no typing.
+
+It works by serving each iDRAC under its own subdomain, `idrac-<id>.<your-domain>`,
+proxied through lab-manager: lab-manager performs the iDRAC login server-side, holds
+the iDRAC session token server-side, and relays the browser's traffic (including the
+KVM WebSocket) to the iDRAC. Because the browser talks only to lab-manager, the iDRAC
+sees a single consistent client and the login sticks. The iDRAC session token is never
+exposed to the browser. (The serial console / SOL remains available as a fallback.)
+
+#### Enabling (Docker Swarm / Traefik only)
+
+This feature needs the Traefik reverse-proxy deploy; it does nothing in the
+host-networked `docker-compose` setup. Requirements:
+
+1. **`LAB_MANAGER_BMC_PROXY_DOMAIN`** set to your base domain (e.g.
+   `pi.home.kilar.net`) in the stack environment.
+2. A Traefik router sending `idrac-*.<domain>` to the lab-manager service — already
+   included in `docker-stack.yml` (a `HostRegexp` router reusing the default
+   wildcard cert).
+3. Wildcard DNS (`*.<domain>`) resolving to the cluster, and a TLS cert covering the
+   one-label `idrac-<id>.<domain>` names (the cluster's `*.pi.home.kilar.net` wildcard
+   already covers `idrac-<id>.pi.home.kilar.net`).
+
+Only iDRAC servers with stored credentials show the KVM button.
 
 ## Usage
 
