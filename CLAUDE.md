@@ -58,7 +58,7 @@ WOL_ENABLED=false
 
 ## Architecture
 
-A standard `cmd/` + `internal/` Go layout. The entry point is `cmd/lab-manager/main.go`; everything else lives in `internal/` packages with an acyclic dependency graph (`model` ← `secret` ← `store` ← `power`/`console` ← `web` ← `cmd`). There is no `static/` directory or JS build; HTML is embedded.
+A standard `cmd/` + `internal/` Go layout. The entry point is `cmd/lab-manager/main.go`; everything else lives in `internal/` packages with an acyclic dependency graph (`model` ← `secret` ← `store` ← `power`/`console`/`sol` ← `web` ← `cmd`). HTML is embedded; the only static assets are the vendored xterm.js files under `internal/web/static/` (embedded via `//go:embed`, served at `/static/`).
 
 Packages:
 - **`cmd/lab-manager`** (`package main`) — config loading, wiring (cipher → store+migrations+seed → `web.New`), and the `http.Server` (`:5000`).
@@ -67,7 +67,8 @@ Packages:
 - **`internal/store`** — SQLite access (`modernc.org/sqlite`, pure-Go/CGO-free), schema creation + additive migrations, server/user CRUD, default-admin seeding, and the transparent credential encrypt-on-write / decrypt-on-read.
 - **`internal/power`** — `Controller` for Redfish / IPMI / Wake-on-LAN power control and live status checks (persists status via the store).
 - **`internal/console`** — `Manager` for console access tokens, plus per-vendor BMC login config and the iDRAC server-side credential pre-flight.
-- **`internal/web`** — the HTTP layer: `App` (holds the store + `power.Controller` + `console.Manager` + templates), routing (`routes.go`), handlers, sessions/CSRF (`session.go`), validation (`validate.go`), and template rendering + view models (`render.go`). The embedded templates live in `internal/web/templates/`. `App.New` builds the services; `App.Handler` is the `withSession → withCSRF → routes` chain.
+- **`internal/sol`** — IPMI Serial-over-LAN session manager: resolves creds (IPMI, else Redfish), runs `ipmitool ... sol activate` via an injectable runner (password via `IPMI_PASSWORD` env, never argv), and exposes a `Session` (`Stdin`/`Output`) the web layer bridges to a browser xterm.js terminal. `Start` deactivates first to clear a stale single-session payload; `Close` cancels and deactivates so the BMC payload is always released.
+- **`internal/web`** — the HTTP layer: `App` (holds the store + `power.Controller` + `console.Manager` + `sol.Manager` + templates), routing (`routes.go`), handlers (incl. `sol.go`: the SOL launch page + WebSocket bridge), sessions/CSRF (`session.go`), validation (`validate.go`), template rendering + view models (`render.go`), and the embedded static assets (`static.go`). The embedded templates live in `internal/web/templates/`. `App.New` builds the services; `App.Handler` is the `withSession → withCSRF → routes` chain.
 
 Cross-cutting behavior:
 
@@ -106,6 +107,8 @@ The most involved feature; understanding it requires reading several functions i
 - **Web UI**: `/`, `/server/new`, `/server/<id>/edit`, `/server/<id>/delete`, `/server/<id>/power/<action>`, `/server/<id>/wol`, `/check-all-servers`
 - **API (JSON)**: `/api/server/<id>/power/<action>`, `/api/server/<id>/power/check`
 - **Console**: `/server/<id>/console`, `/server/<id>/console/launch`
+- **Serial console (SOL)**: `/server/<id>/sol/launch` (xterm.js page), `/server/<id>/sol` (WebSocket; same-origin session auth + `Origin` check, gorilla/websocket)
+- **Static**: `/static/...` (embedded vendored xterm.js; no auth)
 - **Auth**: `/login`, `/logout`, `/change-password`
 
 Routes are registered with Go 1.22+ method+wildcard patterns (e.g. `POST /server/{id}/power/{action}`, `GET /{$}` for the exact index). All routes except `/login` require authentication via the `requireLogin` wrapper; non-integer ids 404.
