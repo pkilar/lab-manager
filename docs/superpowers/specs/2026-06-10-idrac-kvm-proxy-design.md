@@ -84,16 +84,26 @@ The iDRAC only ever sees lab-manager's IP (the browser never talks to it
 directly), so cookie + source-IP binding stay consistent.
 
 1. **Initiate (main host):** the KVM button → `GET /server/<id>/kvm` (behind
-   `requireLogin`). It verifies the server is an iDRAC with creds, mints a
-   short-lived signed token (HMAC over `server-id:user-id:timestamp`, 30 s), and
-   302-redirects to `https://idrac-<id>.<proxy-domain>/__labmgr/auth?token=<t>`.
+   `requireLogin`). It verifies the server is an iDRAC with creds, logs the
+   launching user, mints a short-lived signed token (HMAC over
+   `server-id:timestamp`, 30 s), and 302-redirects to
+   `https://idrac-<id>.<proxy-domain>/__labmgr/auth?token=<t>`.
+   - **Note (decided during implementation):** the token is bound to the
+     **server id only**, not the user id. The handshake runs on the subdomain
+     origin, which has no lab-manager session, so it *cannot verify* a user id —
+     binding to it would add no enforceable control. The launching user is
+     recorded in the server log at mint time (`slog.Info "KVM proxy launch"`);
+     server-id binding still prevents replaying a token against another iDRAC's
+     subdomain, and the 30 s TTL + the login-gated initiator bound issuance. All
+     authenticated app users are full admins, so user-scoping the token grants
+     no additional authorization.
 2. **Handshake (proxy host):** `GET /__labmgr/auth?token=<t>`:
    - Verify the token (constant-time, bound to the `<id>` parsed from the Host,
      within 30 s). On failure → redirect to the main app's initiator.
    - Server-side POST the iDRAC `/data/login` (creds from the store) → capture the
      `-http-session-` cookie value and the `forwardUrl` (`index.html?ST1=…,ST2=…`).
      On login failure → an error page with a link back to the dashboard.
-   - Create a server-side session: a random 256-bit id → `{serverID, userID,
+   - Create a server-side session: a random 256-bit id → `{serverID,
      idracCookie, expiry (8 h)}`. Set an opaque `bmcproxy` cookie (the id;
      HttpOnly, Secure, `SameSite=Lax`, host-scoped to the subdomain).
    - 302 the browser to the proxied `forwardUrl` (`/index.html?ST1=…,ST2=…`).

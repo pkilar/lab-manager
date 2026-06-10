@@ -16,9 +16,12 @@ import (
 const idracSessionCookie = "-http-session-"
 
 // proxyTransport reaches BMCs which present self-signed certs. Shared so its
-// connection pool is reused across the login and the relay.
+// connection pool is reused across the login and the relay. ResponseHeaderTimeout
+// bounds a hung iDRAC on the relay path (it caps time-to-first-header only, so it
+// does not interrupt the KVM WebSocket once the 101 upgrade has come back).
 var proxyTransport = &http.Transport{
-	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
+	TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
+	ResponseHeaderTimeout: 30 * time.Second,
 }
 
 // loginClient never follows redirects: /data/login returns 200 + XML, and we
