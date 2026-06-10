@@ -73,7 +73,10 @@ services:
         # same service (the app resolves the iDRAC by id from the Host). Reuses the
         # default *.pi cert via tls=true. Traefik v3 HostRegexp takes a Go regexp.
         # Only effective when LAB_MANAGER_BMC_PROXY_DOMAIN is set above.
-        - "traefik.http.routers.lab-manager-bmc.rule=HostRegexp(`^idrac-[0-9]+\\.pi\\.home\\.kilar\\.net$`)"
+        # NOTE: the trailing `$$` is an ESCAPED `$` — Compose/Portainer do env-var
+        # interpolation on `$`, so a lone `$` anchor makes Portainer 500. `$$`
+        # un-escapes to a single `$` for Traefik (and a literal `$$` still matches).
+        - "traefik.http.routers.lab-manager-bmc.rule=HostRegexp(`^idrac-[0-9]+\\.pi\\.home\\.kilar\\.net$$`)"
         - "traefik.http.routers.lab-manager-bmc.entrypoints=websecure"
         - "traefik.http.routers.lab-manager-bmc.tls=true"
         - "traefik.http.routers.lab-manager-bmc.service=lab-manager"
