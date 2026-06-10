@@ -1,6 +1,7 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -63,9 +64,11 @@ func (a *App) handleSOLSocket(w http.ResponseWriter, r *http.Request) {
 		return // Upgrade already wrote the HTTP error (e.g. 403 on bad Origin)
 	}
 	defer func() { _ = conn.Close() }()
+	conn.SetReadLimit(4096) // terminal keystrokes are tiny; bound hostile frames
 
 	sess, err := a.sol.Start(r.Context(), s)
 	if err != nil {
+		log.Printf("ERROR: SOL session start (server %d): %v", id, err)
 		_ = conn.WriteMessage(websocket.TextMessage, []byte("\r\n"+err.Error()+"\r\n"))
 		return
 	}
