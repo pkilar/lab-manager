@@ -33,5 +33,12 @@ func (a *App) routes() *http.ServeMux {
 	mux.HandleFunc("GET /server/{id}/console", a.requireLogin(true, a.handleServerConsole))
 	mux.HandleFunc("GET /server/{id}/console/launch", a.requireLogin(true, a.handleConsoleLaunch))
 
+	// Serial-over-LAN console.
+	mux.HandleFunc("GET /server/{id}/sol/launch", a.requireLogin(true, a.handleSOLLaunch))
+	mux.HandleFunc("GET /server/{id}/sol", a.requireLogin(true, a.handleSOLSocket))
+
+	// Static assets (vendored xterm.js); not sensitive, no auth needed.
+	mux.Handle("GET /static/", staticHandler())
+
 	return mux
 }

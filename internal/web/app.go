@@ -7,6 +7,7 @@ import (
 
 	"github.com/pkilar/lab-manager/internal/console"
 	"github.com/pkilar/lab-manager/internal/power"
+	"github.com/pkilar/lab-manager/internal/sol"
 	"github.com/pkilar/lab-manager/internal/store"
 )
 
@@ -15,6 +16,7 @@ type App struct {
 	store      *store.Store
 	power      *power.Controller
 	console    *console.Manager
+	sol        *sol.Manager
 	tmpl       *Templates
 	secretKey  []byte
 	wolEnabled bool
@@ -31,6 +33,7 @@ func New(st *store.Store, secretKey []byte, wolEnabled bool) (*App, error) {
 		store:      st,
 		power:      power.NewController(st, wolEnabled),
 		console:    console.NewManager(secretKey),
+		sol:        sol.NewManager(),
 		tmpl:       tmpl,
 		secretKey:  secretKey,
 		wolEnabled: wolEnabled,
