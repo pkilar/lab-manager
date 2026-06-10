@@ -264,6 +264,7 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 	}
 	sid, err := m.sessions.create(id, cookie)
 	if err != nil {
+		log.Printf("ERROR: bmcproxy session create (server %d): %v", id, err)
 		m.errorPage(w, "internal error")
 		return
 	}
@@ -275,7 +276,25 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, "/"+strings.TrimPrefix(forwardURL, "/"), http.StatusFound)
+	http.Redirect(w, r, safeForwardPath(forwardURL), http.StatusFound)
+}
+
+// safeForwardPath keeps only the path+query of the iDRAC-supplied forward URL,
+// dropping any scheme/host so a malicious or compromised iDRAC cannot
+// open-redirect the browser off-site (e.g. "//evil.com/x").
+func safeForwardPath(forwardURL string) string {
+	u, err := url.Parse(forwardURL)
+	if err != nil {
+		return "/"
+	}
+	dest := u.EscapedPath()
+	if u.RawQuery != "" {
+		dest += "?" + u.RawQuery
+	}
+	if !strings.HasPrefix(dest, "/") {
+		dest = "/" + dest
+	}
+	return dest
 }
 
 func (m *Manager) errorPage(w http.ResponseWriter, msg string) {

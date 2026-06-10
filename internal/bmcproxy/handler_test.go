@@ -62,6 +62,21 @@ func TestHandshakeLogsInAndSetsSession(t *testing.T) {
 	}
 }
 
+func TestSafeForwardPathBlocksOpenRedirect(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"index.html?ST1=aaa,ST2=bbb", "/index.html?ST1=aaa,ST2=bbb"},
+		{"/index.html?x=1", "/index.html?x=1"},
+		{"//evil.com/x", "/x"},               // protocol-relative → same-origin path only
+		{"https://evil.com/p?q=1", "/p?q=1"}, // absolute → host dropped
+		{"", "/"},                            // empty → root
+	}
+	for _, c := range cases {
+		if got := safeForwardPath(c.in); got != c.want {
+			t.Errorf("safeForwardPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestHandshakeBadTokenBounces(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}}, []byte("s"), "pi.home.kilar.net")
