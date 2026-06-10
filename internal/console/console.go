@@ -114,8 +114,11 @@ func LoginConfigFor(s *model.Server) *BMCLoginConfig {
 	switch s.BMCType {
 	case model.BMCIDRAC:
 		return &BMCLoginConfig{
-			LoginURL:          "https://" + ip + "/data/login",
-			ConsoleURL:        "https://" + ip + "/console",
+			LoginURL: "https://" + ip + "/data/login",
+			// The iDRAC root redirects into the live login SPA. The old
+			// /console path is a dead 302 → /start.html?console → 404 on
+			// iDRAC 8/9 firmware, so the launch page opens the root instead.
+			ConsoleURL:        "https://" + ip + "/",
 			SupportsAutoLogin: true,
 		}
 	case model.BMCSupermicro:
@@ -154,7 +157,7 @@ type IDRACAuthResult struct {
 // console launches can't exhaust the iDRAC session table.
 func (m *Manager) PreAuthenticateIDRAC(ctx context.Context, s *model.Server) IDRACAuthResult {
 	ip := s.IPAddress
-	res := IDRACAuthResult{ConsoleURL: "https://" + ip + "/console"}
+	res := IDRACAuthResult{ConsoleURL: "https://" + ip + "/"}
 
 	user, pass := CredsFor(s)
 	if user == "" {
@@ -168,8 +171,15 @@ func (m *Manager) PreAuthenticateIDRAC(ctx context.Context, s *model.Server) IDR
 	return res
 }
 
-// idracRedfishPreAuth tries the Redfish SessionService (iDRAC 8/9). It returns
-// true when the caller should fall through to the legacy method.
+// idracRedfishPreAuth creates a session on the Redfish session collection
+// (iDRAC 8/9). It returns true when the caller should fall through to the
+// legacy method.
+//
+// The session is created at /redfish/v1/Sessions — the canonical collection the
+// Redfish ServiceRoot advertises as Links.Sessions. The /redfish/v1/SessionService/Sessions
+// alias is NOT used: some Dell firmware answers POST there with 405 Method Not
+// Allowed (while still transiently minting a session), so posting to the alias
+// both fails the pre-auth and leaks a session on every launch.
 func idracRedfishPreAuth(ctx context.Context, ip, user, pass string, res *IDRACAuthResult) (tryLegacy bool) {
 	var sessionToken, sessionLocation string
 	defer func() {
@@ -183,7 +193,7 @@ func idracRedfishPreAuth(ctx context.Context, ip, user, pass string, res *IDRACA
 	defer cancel()
 
 	body, _ := json.Marshal(map[string]string{"UserName": user, "Password": pass})
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "https://"+ip+"/redfish/v1/SessionService/Sessions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "https://"+ip+"/redfish/v1/Sessions", bytes.NewReader(body))
 	if err != nil {
 		res.Error = err.Error()
 		return true
@@ -202,10 +212,15 @@ func idracRedfishPreAuth(ctx context.Context, ip, user, pass string, res *IDRACA
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Capture any session the controller issued *before* branching on status.
+	// Some firmware attaches a usable X-Auth-Token even to a non-2xx reply;
+	// reading it here (not only on success) guarantees the deferred cleanup
+	// deletes it, so a launch can never leak an iDRAC session.
+	sessionToken = resp.Header.Get("X-Auth-Token")
+	sessionLocation = resp.Header.Get("Location")
+
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
-		sessionToken = resp.Header.Get("X-Auth-Token")
-		sessionLocation = resp.Header.Get("Location")
 		res.Success = true
 		res.Method = "redfish"
 		if sessionToken != "" {

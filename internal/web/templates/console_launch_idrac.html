@@ -302,9 +302,11 @@
 
         <!-- Ready display (shown after iDRAC window is opened) -->
         <div class="success-box" id="successBox">
-            <h3>iDRAC Window Opened</h3>
-            <p>Use the credentials below to sign in. If you see a certificate
-               warning, accept it to continue to the iDRAC login page.</p>
+            <h3>iDRAC Login Opened</h3>
+            <p>Sign in with the credentials below (the password was copied to
+               your clipboard), then open <strong>Virtual Console</strong> from
+               the iDRAC dashboard. If you see a certificate warning, accept it
+               to continue.</p>
         </div>
 
         <!-- Launch / manual login panel -->
@@ -329,16 +331,16 @@
             </div>
             {{end}}
             <button class="launch-btn" id="launchKvmBtn" onclick="launchKVM()">
-                Launch KVM Console
+                Open iDRAC Console
             </button>
             <a href="https://{{.IPAddress}}/" target="_blank" rel="noopener" class="secondary-btn">
-                Open iDRAC Login (Manual)
+                Open iDRAC Login (new tab)
             </a>
             <p class="info-text">
-                <strong>First launch?</strong> If a certificate warning appears in
-                the popup, accept it once for <code>{{.IPAddress}}</code>
-                and click Launch again. Subsequent launches will sign in and open
-                the HTML5 KVM viewer automatically.
+                Opens the iDRAC web interface for <code>{{.IPAddress}}</code>.
+                Sign in with the credentials above, then launch
+                <strong>Virtual Console</strong> from the dashboard. If a
+                certificate warning appears, accept it once for this iDRAC.
             </p>
         </div>
 
@@ -362,12 +364,9 @@
 
     <script>
         // Configuration from server.
-        // Auto-login strategy: we POST credentials via a form targeting a
-        // named popup window (NOT a hidden iframe). The popup is a top-level
-        // browsing context at the iDRAC origin, so Set-Cookie lands as a
-        // first-party cookie, TLS warnings can be accepted by the user, and
-        // the opener can navigate the popup cross-origin to the console URL.
-        // See launchKVM() below for the full flow and caveats.
+        // consoleUrl is the iDRAC root (its live login SPA). True cross-origin
+        // auto-login isn't possible here, so launchKVM() opens that page and
+        // copies the password for the operator to paste. See launchKVM() below.
         const CONFIG = {
             ip: {{js .IPAddress}},
             consoleUrl: {{js .ConsoleURL}},
@@ -494,143 +493,54 @@
         }
 
         /**
-         * Auto-login to iDRAC and open the HTML5 KVM console.
+         * Open the iDRAC login page and hand the user verified credentials.
          *
-         * Strategy:
-         *   1. Open a named popup window (this click is the required user
-         *      gesture - a popup opened from window.load is usually blocked).
-         *   2. Submit a form POST to iDRAC's /data/login endpoint targeting
-         *      that popup. Because the POST is a top-level navigation of the
-         *      popup, iDRAC's Set-Cookie response lands as a FIRST-PARTY
-         *      cookie on the iDRAC origin - not a third-party cookie subject
-         *      to SameSite/ITP/CHIPS blocking. This is the key difference vs
-         *      the hidden-iframe approach that was deliberately avoided here.
-         *   3. Wait briefly for iDRAC to persist the session. We cannot
-         *      observe the cross-origin load event, so a fixed delay is the
-         *      best we can do without a server-side reverse proxy.
-         *   4. Navigate the popup to the console URL from the opener.
-         *      WindowProxy.location.href = x is permitted cross-origin for
-         *      opener-owned popups; the browser issues a same-origin GET
-         *      that carries the session cookie and lands logged in.
+         * Why this is NOT a true auto-login: the iDRAC web console runs as a
+         * single-page app whose session is an HttpOnly `-http-session-` cookie
+         * paired with per-login ST1/ST2 tokens that the SPA reads from the
+         * login response body. From this different web origin the browser can
+         * neither read those tokens (same-origin policy) nor inject them into
+         * the iDRAC origin's storage, so credentials cannot be planted into a
+         * working SPA session client-side. (The only way to fully automate it
+         * is a same-origin server-side reverse proxy that performs /data/login
+         * and forwards the ST tokens - a much larger feature.)
          *
-         * Failure modes and mitigations:
-         *   - Self-signed TLS cert not trusted -> browser intercepts the POST
-         *     with a cert warning. User must accept once; we tell them so.
+         * So we do the honest, reliable thing: open the iDRAC's real login page
+         * in a top-level window and copy the password to the clipboard so the
+         * operator only has to paste it and click Virtual Console.
+         *
+         * Failure modes:
+         *   - Self-signed TLS cert not trusted -> the popup shows a cert
+         *     warning; the user accepts it once for this iDRAC.
          *   - Popup blocked -> showError() and re-enable the launch button.
-         *   - Popup closed mid-flight -> detect via popup.closed and abort.
-         *   - iDRAC slower than delay -> rare; re-clicking Launch recovers
-         *     because the session cookie is already set from the first POST.
          */
-        function renderPopupPlaceholder(popup, ip) {
-            // Render a friendly placeholder using DOM APIs (safer than
-            // document.write, which is blocked by our CSP / security hook).
-            // Only works before the popup navigates cross-origin; after that
-            // we lose DOM access and the try/catch swallows the error.
-            try {
-                const doc = popup.document;
-                doc.title = 'Connecting to iDRAC...';
-                const body = doc.body;
-                if (!body) return;
-                // Clear any existing children
-                while (body.firstChild) body.removeChild(body.firstChild);
-                body.style.cssText = 'font-family:-apple-system,sans-serif;background:#1a1a2e;'
-                    + 'color:#fff;display:flex;align-items:center;justify-content:center;'
-                    + 'height:100vh;margin:0;';
-                const wrap = doc.createElement('div');
-                wrap.style.cssText = 'text-align:center;padding:20px;';
-                const h2 = doc.createElement('h2');
-                h2.textContent = 'Signing in to iDRAC...';
-                h2.style.cssText = 'color:#4ade80;margin-bottom:10px;';
-                const p = doc.createElement('p');
-                p.textContent = 'If prompted, accept the security certificate for ' + ip + '.';
-                wrap.appendChild(h2);
-                wrap.appendChild(p);
-                body.appendChild(wrap);
-            } catch (e) {
-                // Popup already navigated cross-origin, or not yet ready.
-            }
-        }
-
         async function launchKVM() {
             const btn = document.getElementById('launchKvmBtn');
             if (btn) btn.disabled = true;
 
-            // Reset UI
             document.getElementById('errorBox').style.display = 'none';
-            document.getElementById('successBox').style.display = 'none';
-            document.getElementById('statusBox').style.display = 'block';
-            document.getElementById('spinner').style.display = 'block';
-            setStep(1);
-            updateStatus('Opening console window...', 'Waiting for popup');
+            document.getElementById('statusBox').style.display = 'none';
 
-            // Unique popup name per server so multiple KVMs can coexist
-            // in separate windows without clobbering each other.
-            const winName = 'iDRACKVM_{{.ServerID}}';
+            // Unique popup name per server so multiple iDRAC tabs can coexist
+            // without clobbering each other.
+            const winName = 'iDRAC_{{.ServerID}}';
             const winFeatures = 'width=1280,height=900,menubar=no,toolbar=no,location=yes,status=yes';
-            const popup = window.open('about:blank', winName, winFeatures);
+            const popup = window.open(CONFIG.consoleUrl, winName, winFeatures);
             if (!popup || popup.closed) {
                 if (btn) btn.disabled = false;
                 showError('Pop-up blocked. Please allow pop-ups for this site, then click Launch again.');
                 return;
             }
             consoleWindow = popup;
-            renderPopupPlaceholder(popup, CONFIG.ip);
 
-            setStep(2);
-            updateStatus('Submitting credentials...', 'POST /data/login');
-
-            // Build and submit a form POST targeting the named popup.
-            const existing = document.getElementById('__iDRACLoginForm');
-            if (existing) existing.remove();
-
-            const form = document.createElement('form');
-            form.id = '__iDRACLoginForm';
-            form.method = 'POST';
-            form.action = 'https://' + CONFIG.ip + '/data/login';
-            form.target = winName;
-            form.enctype = 'application/x-www-form-urlencoded';
-            form.style.display = 'none';
-
-            const addField = (name, value) => {
-                const input = document.createElement('input');
-                input.type = 'hidden';
-                input.name = name;
-                input.value = value;
-                form.appendChild(input);
-            };
-            addField('user', CONFIG.username);
-            addField('password', CONFIG.password);
-
-            document.body.appendChild(form);
-            form.submit();
-
-            // Wait for iDRAC to process the POST and set the session cookie.
-            // 2.5s is a conservative default that works on both iDRAC8 and iDRAC9.
-            // If your iDRAC is slow, bump this up.
-            updateStatus('Authenticating...', 'Waiting for iDRAC response');
-            await sleep(2500);
-
-            if (popup.closed) {
-                if (btn) btn.disabled = false;
-                showError('Login window was closed before the console could load.');
-                return;
+            // Best-effort convenience: drop the password on the clipboard so
+            // the operator just pastes it into the iDRAC login form. Silently
+            // ignored when the clipboard API is unavailable (plain-HTTP LAN);
+            // the copy buttons below remain the reliable path.
+            if (CONFIG.password && window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(CONFIG.password).catch(() => {});
             }
 
-            setStep(3);
-            updateStatus('Opening KVM console...', 'Loading HTML5 viewer');
-
-            // Navigate the popup to the console URL. The session cookie set
-            // by the POST response is now first-party to the iDRAC origin
-            // and will be sent with this GET - landing us logged in.
-            try {
-                popup.location.href = CONFIG.consoleUrl;
-            } catch (e) {
-                if (btn) btn.disabled = false;
-                showError('Could not navigate to console: ' + e.message);
-                return;
-            }
-
-            await sleep(800);
             showReady();
             if (btn) btn.disabled = false;
         }
@@ -671,7 +581,7 @@
             // the first-party cookie context that makes auto-login work,
             // so we intentionally do NOT auto-launch on page load.
             document.getElementById('spinner').style.display = 'none';
-            updateStatus('Ready to launch', 'Click "Launch KVM Console" below to sign in');
+            updateStatus('Ready to launch', 'Click "Open iDRAC Console" below');
             document.getElementById('manualLogin').style.display = 'block';
         }
 
