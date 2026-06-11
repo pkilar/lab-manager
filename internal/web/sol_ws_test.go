@@ -80,3 +80,24 @@ func TestSOLSocketRejectsForeignOrigin(t *testing.T) {
 		t.Fatalf("want 403 on foreign Origin, got %v", resp)
 	}
 }
+
+// TestSOLSocketUpgradeSucceeds guards the bug where the session middleware's
+// ResponseWriter wrapper didn't implement http.Hijacker, so every SOL upgrade
+// through the app chain failed with 500. A same-origin authenticated request
+// must complete the WebSocket handshake (101).
+func TestSOLSocketUpgradeSucceeds(t *testing.T) {
+	srv, c, _ := testServer(t)
+	authenticateAndSeed(t, srv.URL, c) // seeds an iDRAC server (id 1) with creds
+	h := http.Header{
+		"Cookie": {cookieHeader(t, c, srv.URL)},
+		"Origin": {srv.URL}, // same origin
+	}
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL(srv.URL, 1), h)
+	if err != nil {
+		t.Fatalf("SOL upgrade failed (session middleware must implement Hijack): %v (resp=%v)", err, resp)
+	}
+	defer func() { _ = conn.Close() }()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status=%d, want 101", resp.StatusCode)
+	}
+}

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -9,7 +10,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 
@@ -120,6 +123,18 @@ type sessionWriter struct {
 // Unwrap exposes the underlying writer so http.ResponseController can reach any
 // optional interfaces (Flusher, Hijacker, ...) the original writer implements.
 func (w *sessionWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Hijack lets WebSocket upgrades take over the connection. gorilla/websocket
+// type-asserts http.Hijacker on the ResponseWriter directly (it does not go
+// through http.ResponseController/Unwrap), so this wrapper must implement it or
+// every upgrade through the session middleware fails with 500 (the SOL console).
+func (w *sessionWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("sessionWriter: underlying ResponseWriter is not an http.Hijacker")
+	}
+	return hj.Hijack()
+}
 
 func (w *sessionWriter) flushSession() {
 	if w.flushed {
