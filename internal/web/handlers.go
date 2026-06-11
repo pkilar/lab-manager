@@ -240,14 +240,27 @@ func (a *App) updateServer(w http.ResponseWriter, r *http.Request, s *model.Serv
 	s.Notes = f.Notes
 	s.LastUpdated = time.Now().UTC()
 
-	// Only overwrite a password when a new one was supplied.
-	setRedfish := f.RedfishPassword != ""
-	setIPMI := f.IPMIPassword != ""
-	if setRedfish {
+	// Credential rules, per protocol (Redfish / IPMI):
+	//   - empty username   → remove the credentials (clear username AND password)
+	//   - new password      → update the password
+	//   - blank password    → keep the stored one (so edits don't require re-typing)
+	setRedfish := false
+	switch {
+	case f.RedfishUser == "":
+		s.RedfishPassword = ""
+		setRedfish = true
+	case f.RedfishPassword != "":
 		s.RedfishPassword = f.RedfishPassword
+		setRedfish = true
 	}
-	if setIPMI {
+	setIPMI := false
+	switch {
+	case f.IPMIUser == "":
+		s.IPMIPassword = ""
+		setIPMI = true
+	case f.IPMIPassword != "":
 		s.IPMIPassword = f.IPMIPassword
+		setIPMI = true
 	}
 	if err := a.store.UpdateServer(s, setRedfish, setIPMI); err != nil {
 		a.serverError(w, r, err)

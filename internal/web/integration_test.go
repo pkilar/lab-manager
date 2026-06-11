@@ -203,3 +203,57 @@ func TestSecurityHeaders(t *testing.T) {
 		t.Errorf("X-Frame-Options = %q, want DENY", got)
 	}
 }
+
+// TestEditCredentialRules verifies the edit-form credential semantics:
+// empty username removes that protocol's credentials; a blank password keeps the
+// stored one; a new password updates it.
+func TestEditCredentialRules(t *testing.T) {
+	srv, c, st := testServer(t)
+	authenticateAndSeed(t, srv.URL, c) // server 1: iDRAC, redfish root/calvin, no IPMI
+
+	if s, err := st.GetServer(1); err != nil {
+		t.Fatal(err)
+	} else if s.RedfishUser != "root" || s.RedfishPassword != "calvin" {
+		t.Fatalf("seed creds: user=%q pw_set=%v", s.RedfishUser, s.RedfishPassword != "")
+	}
+
+	// Edit with EMPTY redfish_user -> clears redfish user + password; sets IPMI.
+	_, eb := get(t, c, srv.URL+"/server/1/edit")
+	mustRedirect(t, postForm(t, c, srv.URL+"/server/1/edit", url.Values{
+		"name": {"r630"}, "ip_address": {"10.22.40.50"}, "bmc_type": {"idrac"},
+		"redfish_user": {""}, "redfish_password": {""},
+		"ipmi_user": {"root"}, "ipmi_password": {"secret"},
+		"csrf_token": {csrfFrom(t, eb)},
+	}), "/")
+
+	s2, err := st.GetServer(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.RedfishUser != "" || s2.RedfishPassword != "" {
+		t.Fatalf("empty redfish user should clear creds: user=%q pw_set=%v", s2.RedfishUser, s2.RedfishPassword != "")
+	}
+	if s2.IPMIUser != "root" || s2.IPMIPassword != "secret" {
+		t.Fatalf("ipmi creds: user=%q pw=%q", s2.IPMIUser, s2.IPMIPassword)
+	}
+
+	// Edit again: set redfish user + password; leave IPMI password BLANK (keep).
+	_, eb2 := get(t, c, srv.URL+"/server/1/edit")
+	mustRedirect(t, postForm(t, c, srv.URL+"/server/1/edit", url.Values{
+		"name": {"r630"}, "ip_address": {"10.22.40.50"}, "bmc_type": {"idrac"},
+		"redfish_user": {"root"}, "redfish_password": {"calvin"},
+		"ipmi_user": {"root"}, "ipmi_password": {""},
+		"csrf_token": {csrfFrom(t, eb2)},
+	}), "/")
+
+	s3, err := st.GetServer(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s3.RedfishUser != "root" || s3.RedfishPassword != "calvin" {
+		t.Fatalf("redfish should be set: user=%q pw_set=%v", s3.RedfishUser, s3.RedfishPassword != "")
+	}
+	if s3.IPMIUser != "root" || s3.IPMIPassword != "secret" {
+		t.Fatalf("blank ipmi password should keep current: user=%q pw=%q", s3.IPMIUser, s3.IPMIPassword)
+	}
+}
