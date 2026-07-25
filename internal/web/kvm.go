@@ -3,17 +3,12 @@ package web
 import (
 	"log/slog"
 	"net/http"
-
-	"github.com/pkilar/lab-manager/internal/model"
+	"strconv"
 )
 
 // handleKVM (main host) starts the iDRAC KVM proxy handshake: it mints a
 // short-lived token and redirects the browser to the iDRAC's proxy subdomain.
 func (a *App) handleKVM(w http.ResponseWriter, r *http.Request) {
-	if !a.proxy.Enabled() {
-		http.NotFound(w, r)
-		return
-	}
 	id, ok := pathID(r)
 	if !ok {
 		http.NotFound(w, r)
@@ -24,14 +19,13 @@ func (a *App) handleKVM(w http.ResponseWriter, r *http.Request) {
 		a.notFoundOrError(w, r, err)
 		return
 	}
-	if s.BMCType != model.BMCIDRAC {
-		requestSession(r).flash("error", "KVM auto-login is only available for iDRAC servers")
-		http.Redirect(w, r, "/", http.StatusFound)
-		return
-	}
-	if s.RedfishUser == "" && s.IPMIUser == "" {
-		requestSession(r).flash("error", "No credentials configured for this server")
-		http.Redirect(w, r, "/", http.StatusFound)
+	// Console links here for proxy-capable rows, so anything that lands on this
+	// route without auto-login available (proxy switched off, non-iDRAC vendor,
+	// a page cached before the config changed) must degrade to the credentials
+	// page rather than 404 or bounce to the index — otherwise the primary
+	// console button looks like it silently does nothing.
+	if a.consoleTarget(s) == "" {
+		http.Redirect(w, r, "/server/"+strconv.FormatInt(id, 10)+"/console/manual", http.StatusFound)
 		return
 	}
 	slog.Info("KVM proxy launch", "user_id", currentUser(r).ID, "server_id", id)

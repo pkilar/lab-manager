@@ -154,15 +154,15 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	rows := make([]serverRow, 0, len(servers))
 	for _, s := range servers {
 		row := serverRow{
-			ID:         s.ID,
-			Name:       s.Name,
-			IPAddress:  s.IPAddress,
-			BMCType:    s.BMCType,
-			HasCreds:   s.RedfishUser != "" || s.IPMIUser != "",
-			KVMEnabled: a.proxy.Enabled() && s.BMCType == model.BMCIDRAC,
-			HasMAC:     s.MACAddress != "",
-			Status:     s.Status,
-			StatusOn:   s.Status == "On",
+			ID:          s.ID,
+			Name:        s.Name,
+			IPAddress:   s.IPAddress,
+			BMCType:     s.BMCType,
+			HasCreds:    s.RedfishUser != "" || s.IPMIUser != "",
+			ConsoleHref: a.consoleTarget(s),
+			HasMAC:      s.MACAddress != "",
+			Status:      s.Status,
+			StatusOn:    s.Status == "On",
 		}
 		if s.Notes != "" {
 			if rn := []rune(s.Notes); len(rn) > 50 {
@@ -397,6 +397,44 @@ func (a *App) handleAPICheckStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- console -------------------------------------------------------------
+
+// consoleTarget returns the href the primary "Console" button should use, or ""
+// when the browser-side token flow should be used instead. Only the iDRAC proxy
+// achieves a real auto-login: Supermicro's cookie auth survives a cross-origin
+// form POST, but the iDRAC SPA needs ST tokens the browser cannot read, so the
+// server-side proxy is the only path that avoids hand-entered credentials.
+//
+// Single source of truth for the three places that must agree — the button, the
+// /kvm initiator (kvm.go) and the proxy handshake — or a row renders a link that
+// its handler then refuses.
+func (a *App) consoleTarget(s *model.Server) string {
+	if !a.proxy.Enabled() || s.BMCType != model.BMCIDRAC {
+		return ""
+	}
+	if s.RedfishUser == "" && s.IPMIUser == "" {
+		return ""
+	}
+	return "/server/" + strconv.FormatInt(s.ID, 10) + "/kvm"
+}
+
+// handleConsoleManual is the browser-navigable way to reach the credentials
+// page. /server/{id}/console is a JSON API, so it cannot be linked directly;
+// this mints the token the launch page requires and redirects to it. It is the
+// fallback whenever the proxy path fails or is unavailable.
+func (a *App) handleConsoleManual(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := a.store.GetServer(id); err != nil {
+		a.notFoundOrError(w, r, err)
+		return
+	}
+	token := a.console.GenerateToken(id, currentUser(r).ID)
+	http.Redirect(w, r, "/server/"+strconv.FormatInt(id, 10)+
+		"/console/launch?token="+url.QueryEscape(token), http.StatusFound)
+}
 
 func (a *App) handleServerConsole(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r)

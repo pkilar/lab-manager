@@ -121,14 +121,17 @@ type indexData struct {
 }
 
 type serverRow struct {
-	ID               int64
-	Name             string
-	NotesPreview     string
-	NotesTruncated   bool
-	IPAddress        string
-	BMCType          string
-	HasCreds         bool
-	KVMEnabled       bool
+	ID             int64
+	Name           string
+	NotesPreview   string
+	NotesTruncated bool
+	IPAddress      string
+	BMCType        string
+	HasCreds       bool
+	// ConsoleHref is set when the primary Console button should be a plain link
+	// to the auto-login proxy; empty means fall back to the browser-side token
+	// flow (openConsole). See App.consoleTarget.
+	ConsoleHref      string
 	HasMAC           bool
 	Status           string
 	StatusOn         bool

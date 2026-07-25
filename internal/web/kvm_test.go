@@ -122,3 +122,80 @@ func TestHostDispatchRoutesProxyAndApp(t *testing.T) {
 		t.Fatalf("normal-host /__labmgr/auth: status=%d, want 404", resp2.StatusCode)
 	}
 }
+
+// ---- Console button routing ----------------------------------------------
+
+// With the proxy enabled, an iDRAC row's primary Console button must link
+// straight to the auto-login proxy. It previously always rendered the
+// browser-side token flow, which for iDRAC can only ever reach the copy/paste
+// page — so "Console" behaved differently on Dell than on Supermicro.
+func TestConsoleButtonUsesProxyForIDRAC(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c) // seeds iDRAC id 1 with root/calvin
+
+	_, body := get(t, c, srv.URL+"/")
+	if !strings.Contains(body, `href="/server/1/kvm"`) {
+		t.Fatal("iDRAC row should link Console at /server/1/kvm")
+	}
+	if strings.Contains(body, `onclick="openConsole(`) {
+		t.Fatal("iDRAC row should not fall back to the browser-side token flow")
+	}
+	// The credentials fallback must stay reachable: auto-login can fail.
+	if !strings.Contains(body, `href="/server/1/console/manual"`) {
+		t.Fatal("proxy rows need a manual-credentials fallback link")
+	}
+}
+
+// The fallback must keep working wherever auto-login does not apply, or the
+// docker-compose deploy and every non-iDRAC vendor lose their console button.
+func TestConsoleButtonFallsBackWithoutProxy(t *testing.T) {
+	srv, c, _ := testServer(t) // proxy disabled
+	authenticateAndSeed(t, srv.URL, c)
+
+	_, body := get(t, c, srv.URL+"/")
+	if !strings.Contains(body, `onclick="openConsole(`) {
+		t.Fatal("without the proxy the Console button must use the token flow")
+	}
+	if strings.Contains(body, `href="/server/1/kvm"`) {
+		t.Fatal("no /kvm link should render when the proxy is disabled")
+	}
+}
+
+// /console/manual is the only browser-navigable route to the credentials page
+// (/server/{id}/console is JSON), so it must mint a token and land on HTML.
+func TestConsoleManualRedirectsToLaunch(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+
+	resp, err := c.Get(srv.URL + "/server/1/console/manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if resp.StatusCode != http.StatusFound || !strings.HasPrefix(loc, "/server/1/console/launch?token=") {
+		t.Fatalf("status=%d loc=%q", resp.StatusCode, loc)
+	}
+	launchResp, page := get(t, c, srv.URL+loc)
+	if launchResp.StatusCode != http.StatusOK || !strings.Contains(page, "iDRAC") {
+		t.Fatalf("launch page status=%d len=%d", launchResp.StatusCode, len(page))
+	}
+}
+
+// A /kvm link that cannot auto-login must degrade to the credentials page.
+// Returning 404 made the primary Console button look like it did nothing.
+func TestKVMFallsBackToManualWhenUnavailable(t *testing.T) {
+	srv, c, _ := testServer(t) // proxy disabled
+	authenticateAndSeed(t, srv.URL, c)
+
+	resp, err := c.Get(srv.URL + "/server/1/kvm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound ||
+		resp.Header.Get("Location") != "/server/1/console/manual" {
+		t.Fatalf("status=%d loc=%q, want 302 to the credentials page",
+			resp.StatusCode, resp.Header.Get("Location"))
+	}
+}

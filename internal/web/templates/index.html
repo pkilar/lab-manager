@@ -63,17 +63,28 @@
                 </td>
                 <td>
                     <div class="action-buttons">
+                        {{if .ConsoleHref}}
+                        {{/* Auto-login via the server-side proxy. A plain link
+                             keeps the pop-up inside the user gesture, which
+                             window.open() from a fetch callback does not. */}}
+                        <a href="{{.ConsoleHref}}" target="_blank" rel="noopener"
+                            class="btn btn-info btn-sm" title="Opens the BMC already logged in">Console</a>
+                        {{else}}
                         <button type="button" class="btn btn-info btn-sm"
                             onclick="openConsole({{.ID}}, '{{.Name}}')">
                             Console
                         </button>
+                        {{end}}
                         {{if .HasCreds}}
                         <a href="/server/{{.ID}}/sol/launch" target="_blank" rel="noopener"
                             class="btn btn-info btn-sm" title="IPMI Serial-over-LAN console">📟 Serial</a>
                         {{end}}
-                        {{if .KVMEnabled}}
-                        <a href="/server/{{.ID}}/kvm" target="_blank" rel="noopener"
-                            class="btn btn-info btn-sm" title="iDRAC KVM auto-login">KVM</a>
+                        {{if .ConsoleHref}}
+                        {{/* Auto-login can still fail (BMC unreachable, session
+                             table full); this is then the only way to the
+                             credentials. */}}
+                        <a href="/server/{{.ID}}/console/manual" target="_blank" rel="noopener"
+                            class="btn btn-secondary btn-sm" title="Show credentials for manual login">🔑</a>
                         {{end}}
                         <a href="/server/{{.ID}}/edit"
                             class="btn btn-secondary btn-sm">Edit</a>

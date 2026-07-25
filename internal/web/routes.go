@@ -32,6 +32,7 @@ func (a *App) routes() *http.ServeMux {
 	// Console.
 	mux.HandleFunc("GET /server/{id}/console", a.requireLogin(true, a.handleServerConsole))
 	mux.HandleFunc("GET /server/{id}/console/launch", a.requireLogin(true, a.handleConsoleLaunch))
+	mux.HandleFunc("GET /server/{id}/console/manual", a.requireLogin(true, a.handleConsoleManual))
 
 	// Serial-over-LAN console.
 	mux.HandleFunc("GET /server/{id}/sol/launch", a.requireLogin(true, a.handleSOLLaunch))

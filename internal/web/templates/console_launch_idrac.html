@@ -501,13 +501,21 @@
          * login response body. From this different web origin the browser can
          * neither read those tokens (same-origin policy) nor inject them into
          * the iDRAC origin's storage, so credentials cannot be planted into a
-         * working SPA session client-side. (The only way to fully automate it
-         * is a same-origin server-side reverse proxy that performs /data/login
-         * and forwards the ST tokens - a much larger feature.)
+         * working SPA session client-side. The only way to fully automate it is
+         * a same-origin server-side reverse proxy that performs /data/login and
+         * forwards the ST tokens.
          *
-         * So we do the honest, reliable thing: open the iDRAC's real login page
-         * in a top-level window and copy the password to the clipboard so the
-         * operator only has to paste it and click Virtual Console.
+         * That proxy now EXISTS - internal/bmcproxy, reached via /server/<id>/kvm
+         * - and when LAB_MANAGER_BMC_PROXY_DOMAIN is configured the Console
+         * button links straight to it, so this page is no longer the primary
+         * path. (This comment previously said the proxy was an unbuilt "much
+         * larger feature"; it stayed stale after the proxy shipped, which is
+         * why the copy/paste flow remained the default long after it needed to.)
+         *
+         * This page remains the fallback for when the proxy is disabled, for
+         * non-iDRAC vendors, and for when auto-login fails: open the iDRAC's
+         * real login page in a top-level window and copy the password to the
+         * clipboard so the operator only has to paste it.
          *
          * Failure modes:
          *   - Self-signed TLS cert not trusted -> the popup shows a cert

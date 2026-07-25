@@ -301,19 +301,19 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 		user, pass = s.IPMIUser, s.IPMIPassword
 	}
 	if user == "" {
-		m.errorPage(w, r, "No credentials configured for this server")
+		m.errorPage(w, r, id, "No credentials configured for this server")
 		return
 	}
 	cookie, forwardURL, err := idracLogin(r.Context(), s.IPAddress, user, pass)
 	if err != nil {
 		slog.Error("bmcproxy iDRAC login", "server_id", id, "err", err)
-		m.errorPage(w, r, err.Error())
+		m.errorPage(w, r, id, err.Error())
 		return
 	}
 	sid, displaced, err := m.sessions.create(id, s.IPAddress, cookie)
 	if err != nil {
 		slog.Error("bmcproxy session create", "server_id", id, "err", err)
-		m.errorPage(w, r, "internal error")
+		m.errorPage(w, r, id, "internal error")
 		return
 	}
 	// Log out any prior iDRAC session for this server so repeated launches
@@ -353,13 +353,24 @@ func safeForwardPath(forwardURL string) string {
 	return dest
 }
 
-func (m *Manager) errorPage(w http.ResponseWriter, r *http.Request, msg string) {
+// errorPage renders a proxy failure. serverID > 0 adds a link to that server's
+// credentials page: auto-login is now the primary Console action, so a failure
+// here would otherwise dead-end with no way to reach the manual fallback.
+func (m *Manager) errorPage(w http.ResponseWriter, r *http.Request, serverID int64, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusBadGateway)
+	base := m.appBaseURL(r)
 	fmt.Fprintf(w,
 		`<!doctype html><meta charset="utf-8"><title>iDRAC proxy</title>`+
 			`<body style="font-family:sans-serif;background:#1a1a2e;color:#fff;padding:40px">`+
-			`<h2 style="color:#ef4444">Could not open iDRAC</h2><p>%s</p>`+
-			`<p><a style="color:#60a5fa" href="%s/">&larr; Back to lab-manager</a></p>`,
-		html.EscapeString(msg), html.EscapeString(m.appBaseURL(r)))
+			`<h2 style="color:#ef4444">Could not open iDRAC</h2><p>%s</p>`,
+		html.EscapeString(msg))
+	if serverID > 0 {
+		fmt.Fprintf(w,
+			`<p><a style="color:#60a5fa" href="%s/server/%d/console/manual">`+
+				`Open the credentials page for manual login &rarr;</a></p>`,
+			html.EscapeString(base), serverID)
+	}
+	fmt.Fprintf(w, `<p><a style="color:#60a5fa" href="%s/">&larr; Back to lab-manager</a></p>`,
+		html.EscapeString(base))
 }
