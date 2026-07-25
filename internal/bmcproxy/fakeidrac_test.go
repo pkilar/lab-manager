@@ -2,6 +2,7 @@ package bmcproxy
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -73,6 +74,22 @@ func newFakeIDRAC(t *testing.T) *fakeIDRAC {
 		io.WriteString(w, "secret-content")
 	})
 
+	// /echo reports the raw query string as received plus the client-controlled
+	// forwarding headers, so tests can assert what does and does not reach the BMC.
+	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
+		if !requireSession(r) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintf(w, "rawquery=%s|xff=%s|xfh=%s|xfp=%s|fwd=%s|xrip=%s",
+			r.URL.RawQuery,
+			r.Header.Get("X-Forwarded-For"),
+			r.Header.Get("X-Forwarded-Host"),
+			r.Header.Get("X-Forwarded-Proto"),
+			r.Header.Get("Forwarded"),
+			r.Header.Get("X-Real-Ip"))
+	})
+
 	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://"+r.Host+"/protected", http.StatusFound)
 	})
@@ -103,7 +120,7 @@ func newFakeIDRAC(t *testing.T) *fakeIDRAC {
 	})
 
 	f.Server = httptest.NewTLSServer(mux)
-	t.Cleanup(f.Server.Close)
+	t.Cleanup(f.Close)
 	return f
 }
 

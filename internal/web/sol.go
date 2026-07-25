@@ -1,7 +1,7 @@
 package web
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -68,7 +68,7 @@ func (a *App) handleSOLSocket(w http.ResponseWriter, r *http.Request) {
 
 	sess, err := a.sol.Start(r.Context(), s)
 	if err != nil {
-		log.Printf("ERROR: SOL session start (server %d): %v", id, err)
+		slog.Error("SOL session start", "server_id", id, "err", err)
 		_ = conn.WriteMessage(websocket.TextMessage, []byte("\r\n"+err.Error()+"\r\n"))
 		return
 	}

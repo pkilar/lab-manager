@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    # Weekly, so a newly-published advisory against a pinned dependency surfaces
+    # even when nothing has been pushed for a while.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # Single source of truth: the `go` directive in go.mod.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # ipmitool is exec'd by internal/power and internal/sol. The tests use an
+      # injectable runner and never shell out, but installing it keeps the CI
+      # environment honest against the Dockerfile runtime.
+      - name: Install ipmitool
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ipmitool
+
+      - name: go test (race)
+        run: go test -race ./...
+
+      - name: go build
+        run: CGO_ENABLED=0 go build ./cmd/lab-manager
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

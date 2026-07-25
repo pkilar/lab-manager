@@ -44,6 +44,38 @@ func TestRelayInjectsSessionCookie(t *testing.T) {
 	}
 }
 
+// The KVM applet emits query strings net/url cannot parse (bare escapes,
+// semicolon separators), which ReverseProxy.Rewrite drops unless the raw string
+// is copied across. The browser's own forwarding headers must never reach the
+// BMC either: Rewrite strips X-Forwarded-*/Forwarded, and the relay drops the
+// X-Real-Ip that Traefik adds on top.
+func TestRelayPreservesRawQueryAndStripsForwardingHeaders(t *testing.T) {
+	front, _, sid := relayServer(t)
+	const rawQuery = "ST1=aaa,ST2=bbb&kvmport=5900;foo=%ZZ"
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/echo?"+rawQuery, nil)
+	req.AddCookie(&http.Cookie{Name: proxyCookieName, Value: sid})
+	for h, v := range map[string]string{
+		"X-Forwarded-For":   "203.0.113.9",
+		"X-Forwarded-Host":  "evil.example",
+		"X-Forwarded-Proto": "http",
+		"Forwarded":         "for=203.0.113.9",
+		"X-Real-Ip":         "203.0.113.9",
+	} {
+		req.Header.Set(h, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	want := "rawquery=" + rawQuery + "|xff=|xfh=|xfp=|fwd=|xrip="
+	if got := readAll(t, resp); got != want {
+		t.Fatalf("upstream saw\n %q\nwant\n %q", got, want)
+	}
+}
+
 func TestRelayWithoutCookieBounces(t *testing.T) {
 	front, _, _ := relayServer(t)
 	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

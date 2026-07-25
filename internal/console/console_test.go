@@ -1,7 +1,6 @@
 package console
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,7 +77,7 @@ func TestIDRACRedfishPreAuthUsesCanonicalEndpoint(t *testing.T) {
 	defer srv.Close()
 
 	m := NewManager([]byte("k"))
-	res := m.PreAuthenticateIDRAC(context.Background(), &model.Server{
+	res := m.PreAuthenticateIDRAC(t.Context(), &model.Server{
 		IPAddress: hostOf(t, srv), BMCType: model.BMCIDRAC,
 		RedfishUser: "root", RedfishPassword: "calvin",
 	})
@@ -130,7 +129,7 @@ func TestIDRACRedfishPreAuthNeverLeaksSession(t *testing.T) {
 	defer srv.Close()
 
 	m := NewManager([]byte("k"))
-	res := m.PreAuthenticateIDRAC(context.Background(), &model.Server{
+	res := m.PreAuthenticateIDRAC(t.Context(), &model.Server{
 		IPAddress: hostOf(t, srv), BMCType: model.BMCIDRAC,
 		RedfishUser: "root", RedfishPassword: "calvin",
 	})

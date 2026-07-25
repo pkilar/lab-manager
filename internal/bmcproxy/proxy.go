@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -150,26 +150,31 @@ func (m *Manager) sessionFor(r *http.Request) (*proxySession, string) {
 func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idracCookie string) {
 	rp := &httputil.ReverseProxy{
 		Transport: proxyTransport,
-		Director: func(req *http.Request) {
-			req.URL.Scheme = "https"
-			req.URL.Host = ip
-			req.Host = ip
-			req.Header.Set("Origin", "https://"+ip)
-			req.Header.Set("Referer", "https://"+ip+"/")
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "https"
+			pr.Out.URL.Host = ip
+			pr.Out.Host = ip
+			// Rewrite drops query parameters it cannot parse; the KVM applet
+			// relies on its own encoding, so forward the raw string verbatim.
+			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
+			pr.Out.Header.Set("Origin", "https://"+ip)
+			pr.Out.Header.Set("Referer", "https://"+ip+"/")
 			// Rebuild Cookie: drop our proxy cookie and any client-supplied
 			// session, then inject the server-held iDRAC session.
 			var keep []string
-			for _, c := range req.Cookies() {
+			for _, c := range pr.Out.Cookies() {
 				if c.Name == proxyCookieName || c.Name == idracSessionCookie {
 					continue
 				}
 				keep = append(keep, c.Name+"="+c.Value)
 			}
 			keep = append(keep, idracCookie)
-			req.Header.Set("Cookie", strings.Join(keep, "; "))
-			// Don't leak the browser's IP to the BMC. Setting the header to nil
-			// tells ReverseProxy to omit X-Forwarded-For (Del is re-added).
-			req.Header["X-Forwarded-For"] = nil
+			pr.Out.Header.Set("Cookie", strings.Join(keep, "; "))
+			// Don't leak the browser's IP to the BMC: deliberately no
+			// pr.SetXForwarded(). Rewrite already stripped the inbound
+			// X-Forwarded-*/Forwarded headers, but Traefik's X-Real-Ip
+			// is not one of them, so drop it explicitly.
+			pr.Out.Header.Del("X-Real-Ip")
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rewriteLocation(resp, ip, r.Host, proxyScheme(r))
@@ -177,7 +182,7 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			log.Printf("ERROR: bmcproxy upstream %s: %v", ip, err)
+			slog.Error("bmcproxy upstream", "ip", ip, "err", err)
 			http.Error(w, "iDRAC unreachable", http.StatusBadGateway)
 		},
 	}
@@ -189,7 +194,8 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 // web package's requestScheme.
 func proxyScheme(r *http.Request) string {
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		return strings.ToLower(strings.TrimSpace(strings.Split(proto, ",")[0]))
+		first, _, _ := strings.Cut(proto, ",")
+		return strings.ToLower(strings.TrimSpace(first))
 	}
 	if r.TLS != nil {
 		return "https"
@@ -283,13 +289,13 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 	}
 	cookie, forwardURL, err := idracLogin(r.Context(), s.IPAddress, user, pass)
 	if err != nil {
-		log.Printf("ERROR: bmcproxy iDRAC login (server %d): %v", id, err)
+		slog.Error("bmcproxy iDRAC login", "server_id", id, "err", err)
 		m.errorPage(w, err.Error())
 		return
 	}
 	sid, displaced, err := m.sessions.create(id, s.IPAddress, cookie)
 	if err != nil {
-		log.Printf("ERROR: bmcproxy session create (server %d): %v", id, err)
+		slog.Error("bmcproxy session create", "server_id", id, "err", err)
 		m.errorPage(w, "internal error")
 		return
 	}

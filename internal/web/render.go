@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/pkilar/lab-manager/internal/console"
@@ -65,7 +65,7 @@ func (a *App) renderPage(w http.ResponseWriter, name string, status int, data an
 	}
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, "base.html", data); err != nil {
-		log.Printf("ERROR: render page %s: %v", name, err)
+		slog.Error("render page", "template", name, "err", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -82,7 +82,7 @@ func (a *App) renderConsole(w http.ResponseWriter, name string, data any) {
 	}
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, name+".html", data); err != nil {
-		log.Printf("ERROR: render console %s: %v", name, err)
+		slog.Error("render console", "template", name, "err", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}

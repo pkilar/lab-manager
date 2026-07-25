@@ -64,7 +64,8 @@ func actionToCommand(action string) (string, bool) {
 // correct behind Traefik.
 func requestScheme(r *http.Request) string {
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		return strings.ToLower(strings.TrimSpace(strings.Split(proto, ",")[0]))
+		first, _, _ := strings.Cut(proto, ",")
+		return strings.ToLower(strings.TrimSpace(first))
 	}
 	if r.TLS != nil {
 		return "https"

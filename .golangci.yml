@@ -1,0 +1,52 @@
+version: "2"
+
+# Keep the codebase on current Go idioms. `modernize` is the linter that flags
+# outdated patterns (pre-1.21 stdlib use, C-style loops, interface{}, etc.);
+# the rest are the low-noise correctness checks that pair with go vet.
+#
+# The enabled set is chosen so the tree lints clean today — a config that fails
+# on day one just gets switched off. Widen it deliberately, not by accident.
+linters:
+  default: none
+  enable:
+    - modernize      # outdated patterns with a modern stdlib/language equivalent
+    - govet          # the standard vet suite
+    - staticcheck    # correctness, simplification, deprecated-API use (SA/S/ST/QF)
+    - errcheck       # unchecked error returns
+    - ineffassign    # assignments never read
+    - unused         # unused code
+    - bodyclose      # unclosed HTTP response bodies (this app makes many BMC calls)
+    - noctx          # HTTP requests sent without a context
+
+  settings:
+    errcheck:
+      # Writes to an http.ResponseWriter cannot be handled meaningfully — the
+      # response is already committed by the time they fail. Deliberate `_ =`
+      # discards elsewhere stay explicit and still get checked.
+      exclude-functions:
+        - io.WriteString
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+  exclusions:
+    generated: lax
+    rules:
+      # internal/store talks to a single-connection SQLite file with no
+      # request-scoped cancellation, so the non-Context database/sql methods are
+      # a deliberate choice rather than an oversight. noctx still guards the
+      # outbound BMC calls in power/console/bmcproxy, where a missing context
+      # means a hang against an unreachable BMC.
+      - path: internal/store/
+        linters:
+          - noctx
+      # Tests drive httptest servers and t.Fatal on error; these two would be
+      # noise rather than signal there.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
