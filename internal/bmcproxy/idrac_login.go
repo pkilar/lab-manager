@@ -21,7 +21,20 @@ const idracSessionCookie = "-http-session-"
 // bounds a hung iDRAC on the relay path (it caps time-to-first-header only, so it
 // does not interrupt the KVM WebSocket once the 101 upgrade has come back).
 var proxyTransport = &http.Transport{
-	TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
+	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
+	// A hand-rolled Transport does NOT inherit http.DefaultTransport's pooling:
+	// MaxIdleConnsPerHost falls back to DefaultMaxIdleConnsPerHost, which is 2.
+	// The iDRAC UI pulls dozens of resources per page, so all but two needed a
+	// fresh TLS handshake against the BMC's ~1GHz embedded CPU — seconds each,
+	// which serialised into minutes to render the dashboard. Pool aggressively
+	// instead; a BMC only ever serves one operator at a time.
+	//
+	// MaxConnsPerHost is deliberately left unset: it would also cap in-flight
+	// connections, and the KVM WebSocket holds one open for the whole session,
+	// so a cap risks stalling the very thing this proxy exists to carry.
+	MaxIdleConns:          64,
+	MaxIdleConnsPerHost:   32,
+	IdleConnTimeout:       90 * time.Second,
 	ResponseHeaderTimeout: 30 * time.Second,
 }
 
