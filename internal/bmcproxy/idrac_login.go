@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -34,7 +35,26 @@ var loginClient = &http.Client{
 var (
 	authResultPattern = regexp.MustCompile(`<authResult>(\d+)</authResult>`)
 	forwardURLPattern = regexp.MustCompile(`<forwardUrl>([^<]*)</forwardUrl>`)
+	// The iDRAC reports WHY a login was refused in these two fields. Without
+	// them a bare authResult code is unactionable — notably it cannot
+	// distinguish "wrong password" from "web session table full", which
+	// present identically but need opposite fixes.
+	errorMsgPattern     = regexp.MustCompile(`<errorMsg>([^<]*)</errorMsg>`)
+	blockingTimePattern = regexp.MustCompile(`<blockingTime>(\d+)</blockingTime>`)
 )
+
+// loginFailure renders an actionable error from a non-zero authResult, folding
+// in the iDRAC's own errorMsg and any active IP-block backoff.
+func loginFailure(code string, body []byte) error {
+	detail := ""
+	if m := errorMsgPattern.FindSubmatch(body); m != nil && len(m[1]) > 0 {
+		detail = ": " + html.UnescapeString(string(m[1]))
+	}
+	if m := blockingTimePattern.FindSubmatch(body); m != nil && string(m[1]) != "0" {
+		detail += fmt.Sprintf(" (iDRAC is rate-limiting this client for %ss)", m[1])
+	}
+	return fmt.Errorf("iDRAC login failed (authResult %s)%s", code, detail)
+}
 
 // idracLogin performs the iDRAC web login server-side and returns the
 // "-http-session-=..." cookie to inject upstream plus the SPA forward URL
@@ -56,13 +76,19 @@ func idracLogin(ctx context.Context, ip, user, pass string) (cookie, forwardURL 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Check the status before scanning the body: without this, a 404 (endpoint
+	// gone on newer firmware) or a 500 HTML error page both surface as the
+	// useless "response unparseable", hiding what actually went wrong.
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("iDRAC login returned HTTP %d", resp.StatusCode)
+	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	m := authResultPattern.FindSubmatch(body)
 	if m == nil {
 		return "", "", errors.New("iDRAC login response unparseable")
 	}
 	if string(m[1]) != "0" {
-		return "", "", fmt.Errorf("iDRAC login failed (authResult %s)", m[1])
+		return "", "", loginFailure(string(m[1]), body)
 	}
 	for _, c := range resp.Cookies() {
 		if c.Name == idracSessionCookie {

@@ -122,8 +122,8 @@ func (m *Manager) appBaseURL() string { return "https://lab." + m.domain }
 // server-side session cookie. A single ReverseProxy handles both plain HTTP and
 // the KVM WebSocket (it natively tunnels Upgrade requests).
 func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
-	sess, sid := m.sessionFor(r)
-	if sess == nil || sess.serverID != id {
+	sess, sid, ok := m.sessionFor(r)
+	if !ok || sess.serverID != id {
 		http.Redirect(w, r, m.appBaseURL()+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
 		return
 	}
@@ -135,16 +135,16 @@ func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
 	m.serveHTTP(w, r, sid, s.IPAddress, sess.idracCookie)
 }
 
-func (m *Manager) sessionFor(r *http.Request) (*proxySession, string) {
+func (m *Manager) sessionFor(r *http.Request) (proxySession, string, bool) {
 	c, err := r.Cookie(proxyCookieName)
 	if err != nil {
-		return nil, ""
+		return proxySession{}, "", false
 	}
 	sess, ok := m.sessions.get(c.Value)
 	if !ok {
-		return nil, ""
+		return proxySession{}, "", false
 	}
-	return sess, c.Value
+	return sess, c.Value, true
 }
 
 func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idracCookie string) {

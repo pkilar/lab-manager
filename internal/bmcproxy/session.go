@@ -53,18 +53,21 @@ func (s *sessionStore) create(serverID int64, ip, idracCookie string) (id string
 	return id, displaced, nil
 }
 
-func (s *sessionStore) get(id string) (*proxySession, bool) {
+// get returns a COPY of the session. Returning the *proxySession would let the
+// caller read fields after the mutex is released, racing updateCookie, which
+// rewrites idracCookie under the lock when the iDRAC rotates it mid-session.
+func (s *sessionStore) get(id string) (proxySession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
 	if !ok {
-		return nil, false
+		return proxySession{}, false
 	}
 	if s.now().After(sess.expiry) {
 		delete(s.sessions, id)
-		return nil, false
+		return proxySession{}, false
 	}
-	return sess, true
+	return *sess, true
 }
 
 // updateCookie refreshes the injected iDRAC cookie when the controller rotates

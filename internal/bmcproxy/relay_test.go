@@ -1,10 +1,12 @@
 package bmcproxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,6 +76,31 @@ func TestRelayPreservesRawQueryAndStripsForwardingHeaders(t *testing.T) {
 	if got := readAll(t, resp); got != want {
 		t.Fatalf("upstream saw\n %q\nwant\n %q", got, want)
 	}
+}
+
+// sessionStore.get() used to hand out the *proxySession itself after releasing
+// the mutex, so relay read sess.idracCookie unlocked while a concurrent
+// /rotate response rewrote that same field under the lock via updateCookie.
+// The raced field is the credential injected upstream. Overlapping relays trip
+// the race detector; this passes only once get() returns a copy.
+func TestRelayConcurrentRotateIsRaceFree(t *testing.T) {
+	front, _, sid := relayServer(t)
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			for _, path := range []string{"/rotate", "/protected", "/rotate"} {
+				req, _ := http.NewRequest(http.MethodGet, front.URL+path, nil)
+				req.AddCookie(&http.Cookie{Name: proxyCookieName, Value: sid})
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					return
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		})
+	}
+	wg.Wait()
 }
 
 func TestRelayWithoutCookieBounces(t *testing.T) {
