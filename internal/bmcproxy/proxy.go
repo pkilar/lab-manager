@@ -135,6 +135,24 @@ func withPortOf(src, host string) string {
 	return host
 }
 
+// bmcConsolePort is the separate TLS listener the iDRAC serves its HTML5
+// virtual console from. The console SPA builds its URL from
+// window.location.host, so it arrives here as idrac-<id>.<domain>:5900 rather
+// than pointing at the BMC directly — which means it can be proxied, but only
+// if the request is forwarded to the BMC's 5900 instead of 443.
+const bmcConsolePort = "5900"
+
+// upstreamHost picks the BMC address to forward to, honouring the virtual
+// console's separate port. Only bmcConsolePort is passed through: any other
+// inbound port is the app's own listener (":5000" in development) and must not
+// be forwarded to the BMC.
+func upstreamHost(ip, inboundHost string) string {
+	if _, port, err := net.SplitHostPort(inboundHost); err == nil && port == bmcConsolePort {
+		return net.JoinHostPort(stripPort(ip), bmcConsolePort)
+	}
+	return ip
+}
+
 // relay proxies an authenticated request to the iDRAC, injecting the
 // server-side session cookie. A single ReverseProxy handles both plain HTTP and
 // the KVM WebSocket (it natively tunnels Upgrade requests).
@@ -149,7 +167,7 @@ func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
 		http.Error(w, "server not found", http.StatusNotFound)
 		return
 	}
-	m.serveHTTP(w, r, sid, s.IPAddress, sess.idracCookie)
+	m.serveHTTP(w, r, sid, upstreamHost(s.IPAddress, r.Host), sess.idracCookie)
 }
 
 func (m *Manager) sessionFor(r *http.Request) (proxySession, string, bool) {

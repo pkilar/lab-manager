@@ -64,3 +64,26 @@ func TestEnabledAndURLs(t *testing.T) {
 		t.Fatalf("dev appBaseURL = %q", got)
 	}
 }
+
+// The iDRAC's HTML5 virtual console lives on a separate TLS listener on 5900,
+// and its SPA derives the URL from window.location.host — so the request
+// reaches the proxy as idrac-<id>.<domain>:5900 and must be forwarded to the
+// BMC's 5900. Every other inbound port belongs to the app's own listener
+// (":5000" in development) and must NOT be forwarded to the BMC.
+func TestUpstreamHostRoutesConsolePort(t *testing.T) {
+	cases := []struct {
+		name, ip, inbound, want string
+	}{
+		{"console port passes through", "10.22.40.136", "idrac-1.pi.home.kilar.net:5900", "10.22.40.136:5900"},
+		{"https default stays bare", "10.22.40.136", "idrac-1.pi.home.kilar.net", "10.22.40.136"},
+		{"dev app port is not forwarded", "10.22.40.136", "idrac-1.localhost:5000", "10.22.40.136"},
+		{"ip carrying a port is replaced", "127.0.0.1:44321", "idrac-1.pi.home.kilar.net:5900", "127.0.0.1:5900"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := upstreamHost(tc.ip, tc.inbound); got != tc.want {
+				t.Fatalf("upstreamHost(%q, %q) = %q, want %q", tc.ip, tc.inbound, got, tc.want)
+			}
+		})
+	}
+}

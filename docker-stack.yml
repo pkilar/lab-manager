@@ -80,6 +80,21 @@ services:
         - "traefik.http.routers.lab-manager-bmc.entrypoints=websecure"
         - "traefik.http.routers.lab-manager-bmc.tls=true"
         - "traefik.http.routers.lab-manager-bmc.service=lab-manager"
+        # The iDRAC HTML5 virtual console runs on a SEPARATE TLS listener on
+        # 5900. Its SPA builds the URL from window.location.host, so the browser
+        # asks for idrac-<n>.pi.home.kilar.net:5900 — which Traefik must accept
+        # and hand to this same service (the app forwards it to the BMC's 5900;
+        # see bmcproxy.upstreamHost). Without this the console request fails
+        # with ERR_CONNECTION_REFUSED while the rest of the iDRAC UI works.
+        #
+        # PREREQUISITE, outside this repo: Traefik needs a `bmcconsole`
+        # entrypoint on :5900 in its STATIC config, and must publish that port.
+        # It lives in ~/Devel/pi-cluster-ansible, not here. Until it exists this
+        # router is inert (Traefik logs an unknown-entrypoint warning).
+        - "traefik.http.routers.lab-manager-bmcconsole.rule=HostRegexp(`^idrac-[0-9]+\\.pi\\.home\\.kilar\\.net$$`)"
+        - "traefik.http.routers.lab-manager-bmcconsole.entrypoints=bmcconsole"
+        - "traefik.http.routers.lab-manager-bmcconsole.tls=true"
+        - "traefik.http.routers.lab-manager-bmcconsole.service=lab-manager"
       # SQLite has no concurrent-write safety: run exactly ONE task, pinned to one
       # node so the data volume is always the same physical volume.
       replicas: 1
