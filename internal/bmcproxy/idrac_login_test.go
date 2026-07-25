@@ -22,6 +22,32 @@ func TestIDRACLoginCapturesCookieAndForwardURL(t *testing.T) {
 	}
 }
 
+// The iDRAC's login CGI is order-sensitive: it answers authResult 1 to a body
+// that puts password before user, even when the credentials are correct.
+// url.Values.Encode() sorts keys alphabetically and so always produced exactly
+// that rejected form, which broke every server-side login. Assert the wire
+// format directly rather than relying on the fixture alone.
+func TestIDRACLoginSendsUserBeforePassword(t *testing.T) {
+	var got string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = string(b)
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = io.WriteString(w, `<root><authResult>1</authResult><forwardUrl>index.html</forwardUrl></root>`)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, _, _ = idracLogin(t.Context(), strings.TrimPrefix(srv.URL, "https://"), "root", "pa ss+word")
+	if !strings.HasPrefix(got, "user=root&password=") {
+		t.Fatalf("login body = %q, want it to start with user=root&password=", got)
+	}
+	// A space must go out as %20, not "+": this parser is demonstrably
+	// non-standard, and %20 decodes correctly under either interpretation.
+	if !strings.Contains(got, "pa%20ss%2Bword") {
+		t.Fatalf("login body = %q, want the space as %%20 and + as %%2B", got)
+	}
+}
+
 // A bare authResult code cannot distinguish "wrong password" from "session
 // table full" — opposite fixes. The iDRAC says which in errorMsg/blockingTime,
 // so the error must carry them. Body shape is copied from a real iDRAC8

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -41,8 +42,19 @@ func newFakeIDRAC(t *testing.T) *fakeIDRAC {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/data/login", func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		if r.FormValue("user") != "root" || r.FormValue("password") != "calvin" {
+		// The real iDRAC's login CGI is order-sensitive: a body putting password
+		// before user is refused with authResult 1 even when the credentials are
+		// correct (verified on iDRAC8 firmware ~2.6x). r.FormValue is
+		// order-insensitive, so parsing that way made this fixture MORE forgiving
+		// than the hardware and hid a bug that broke every server-side login.
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		if !strings.HasPrefix(string(raw), "user=") {
+			io.WriteString(w, `<root><status>ok</status><authResult>1</authResult>`+
+				`<forwardUrl>index.html</forwardUrl></root>`)
+			return
+		}
+		form, _ := url.ParseQuery(string(raw))
+		if form.Get("user") != "root" || form.Get("password") != "calvin" {
 			io.WriteString(w, `<root><status>ok</status><authResult>5</authResult></root>`)
 			return
 		}

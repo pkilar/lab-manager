@@ -56,6 +56,24 @@ func loginFailure(code string, body []byte) error {
 	return fmt.Errorf("iDRAC login failed (authResult %s)%s", code, detail)
 }
 
+// loginForm builds the /data/login body.
+//
+// The field order is load-bearing: the iDRAC's login CGI rejects a body that
+// puts password before user, answering authResult 1 (bad credentials) even when
+// the credentials are correct. Verified against iDRAC8 firmware ~2.6x:
+//
+//	user=root&password=<correct>  -> authResult 0
+//	password=<correct>&user=root  -> authResult 1
+//
+// url.Values.Encode() sorts keys alphabetically, so it always emitted the
+// password-first form and every server-side login failed. Build the body by
+// hand instead, and percent-encode a space as %20 rather than "+" — this parser
+// has already proven non-standard, and %20 decodes identically either way.
+func loginForm(user, pass string) string {
+	esc := func(v string) string { return strings.ReplaceAll(url.QueryEscape(v), "+", "%20") }
+	return "user=" + esc(user) + "&password=" + esc(pass)
+}
+
 // idracLogin performs the iDRAC web login server-side and returns the
 // "-http-session-=..." cookie to inject upstream plus the SPA forward URL
 // ("index.html?ST1=...,ST2=...").
@@ -63,7 +81,7 @@ func idracLogin(ctx context.Context, ip, user, pass string) (cookie, forwardURL 
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	form := strings.NewReader(url.Values{"user": {user}, "password": {pass}}.Encode())
+	form := strings.NewReader(loginForm(user, pass))
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "https://"+ip+"/data/login", form)
 	if err != nil {
 		return "", "", err

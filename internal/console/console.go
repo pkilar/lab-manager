@@ -300,7 +300,13 @@ func idracLegacyPreAuth(ctx context.Context, ip, user, pass string, res *IDRACAu
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	form := strings.NewReader(url.Values{"user": {user}, "password": {pass}}.Encode())
+	// user MUST precede password: the iDRAC's login CGI answers authResult 1 for
+	// the reversed order even with correct credentials (verified on iDRAC8
+	// firmware ~2.6x), and url.Values.Encode() sorts keys alphabetically. Same
+	// constraint as bmcproxy.loginForm; duplicated rather than shared because
+	// this package deliberately does not depend on bmcproxy.
+	esc := func(v string) string { return strings.ReplaceAll(url.QueryEscape(v), "+", "%20") }
+	form := strings.NewReader("user=" + esc(user) + "&password=" + esc(pass))
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "https://"+ip+"/data/login", form)
 	if err != nil {
 		if res.Error == "" {
