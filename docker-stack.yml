@@ -43,6 +43,18 @@ services:
       # Traefik router below; *.pi.home.kilar.net wildcard DNS already resolves
       # and the default *.pi cert covers it. Empty disables the feature.
       - LAB_MANAGER_BMC_PROXY_DOMAIN=${LAB_MANAGER_BMC_PROXY_DOMAIN:-}
+      # Refuse to start if the settings above came through empty. Deliberately a
+      # LITERAL, not ${LAB_MANAGER_STRICT_CONFIG} — `docker stack deploy` reads
+      # ${...} from the DEPLOYING SHELL and not from .env, so an interpolated
+      # guard would be erased by the very mistake it guards against.
+      #
+      # Without it a redeploy that forgets to export the variables starts a
+      # healthy-looking container that has silently lost KVM auto-login and
+      # signs sessions with a fresh random key on every boot. That has happened.
+      #
+      # Deploy with the values in the Portainer stack environment, or export
+      # them first — do NOT `source .env`, which holds the LOCAL dev values.
+      - LAB_MANAGER_STRICT_CONFIG=true
 
     volumes:
       # SQLite DB + encryption key. A named volume keeps the data on the pinned
