@@ -17,4 +17,11 @@ services:
       # Wake-on-LAN is OFF by default. Requires host networking to work (already
       # set above via network_mode: host). See README "Wake-on-LAN".
       - WOL_ENABLED=${WOL_ENABLED:-false}
+      # iDRAC KVM reverse proxy. Empty disables the feature (and hides the KVM
+      # button). For local development set it to "localhost": the app then also
+      # answers idrac-<id>.localhost:5000, which resolves to 127.0.0.1 and,
+      # under host networking, reaches the BMC directly. Production uses the
+      # real base domain plus the Traefik idrac-* router in docker-stack.yml.
+      #   LAB_MANAGER_BMC_PROXY_DOMAIN=localhost docker compose up -d --build
+      - LAB_MANAGER_BMC_PROXY_DOMAIN=${LAB_MANAGER_BMC_PROXY_DOMAIN:-}
     restart: unless-stopped
