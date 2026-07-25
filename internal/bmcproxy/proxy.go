@@ -110,13 +110,30 @@ func stripPort(host string) string {
 func (m *Manager) MintToken(serverID int64) string { return mintToken(m.secret, serverID) }
 
 // AuthURL is where the initiator redirects the browser to start the handshake.
-func (m *Manager) AuthURL(serverID int64, token string) string {
-	return fmt.Sprintf("https://idrac-%d.%s/__labmgr/auth?token=%s", serverID, m.domain, token)
+// scheme and hostPort come from the request that hit the initiator, so the
+// handshake stays on the scheme (and port) the browser is already using. Under
+// the HTTPS Swarm deploy that is unchanged; it additionally makes the flow
+// reachable over plain HTTP in development, where the whole path was previously
+// impossible to exercise.
+func (m *Manager) AuthURL(scheme, hostPort string, serverID int64, token string) string {
+	host := fmt.Sprintf("idrac-%d.%s", serverID, m.domain)
+	return fmt.Sprintf("%s://%s/__labmgr/auth?token=%s", scheme, withPortOf(hostPort, host), token)
 }
 
 // appBaseURL is the main app's external URL (used to bounce expired sessions
 // back through the login-gated initiator). The app is deployed at lab.<domain>.
-func (m *Manager) appBaseURL() string { return "https://lab." + m.domain }
+func (m *Manager) appBaseURL(r *http.Request) string {
+	return proxyScheme(r) + "://" + withPortOf(r.Host, "lab."+m.domain)
+}
+
+// withPortOf appends src's port to host, so a non-default port in development
+// (":5000") survives while the production HTTPS hosts stay bare.
+func withPortOf(src, host string) string {
+	if _, port, err := net.SplitHostPort(src); err == nil && port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	return host
+}
 
 // relay proxies an authenticated request to the iDRAC, injecting the
 // server-side session cookie. A single ReverseProxy handles both plain HTTP and
@@ -124,7 +141,7 @@ func (m *Manager) appBaseURL() string { return "https://lab." + m.domain }
 func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
 	sess, sid, ok := m.sessionFor(r)
 	if !ok || sess.serverID != id {
-		http.Redirect(w, r, m.appBaseURL()+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
+		http.Redirect(w, r, m.appBaseURL(r)+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
 		return
 	}
 	s, err := m.lookup.GetServer(id)
@@ -271,7 +288,7 @@ func (m *Manager) Handler(w http.ResponseWriter, r *http.Request) {
 func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 	if !verifyToken(m.secret, r.URL.Query().Get("token"), id) {
 		// Bounce through the login-gated initiator to re-mint.
-		http.Redirect(w, r, m.appBaseURL()+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
+		http.Redirect(w, r, m.appBaseURL(r)+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
 		return
 	}
 	s, err := m.lookup.GetServer(id)
@@ -284,19 +301,19 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 		user, pass = s.IPMIUser, s.IPMIPassword
 	}
 	if user == "" {
-		m.errorPage(w, "No credentials configured for this server")
+		m.errorPage(w, r, "No credentials configured for this server")
 		return
 	}
 	cookie, forwardURL, err := idracLogin(r.Context(), s.IPAddress, user, pass)
 	if err != nil {
 		slog.Error("bmcproxy iDRAC login", "server_id", id, "err", err)
-		m.errorPage(w, err.Error())
+		m.errorPage(w, r, err.Error())
 		return
 	}
 	sid, displaced, err := m.sessions.create(id, s.IPAddress, cookie)
 	if err != nil {
 		slog.Error("bmcproxy session create", "server_id", id, "err", err)
-		m.errorPage(w, "internal error")
+		m.errorPage(w, r, "internal error")
 		return
 	}
 	// Log out any prior iDRAC session for this server so repeated launches
@@ -309,7 +326,10 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 		Value:    sid,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		// Secure only over HTTPS: a Secure cookie is dropped by the browser on
+		// a plain-HTTP origin, which would silently break the dev flow. Mirrors
+		// the session cookie in internal/web/session.go.
+		Secure:   proxyScheme(r) == "https",
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, safeForwardPath(forwardURL), http.StatusFound)
@@ -333,7 +353,7 @@ func safeForwardPath(forwardURL string) string {
 	return dest
 }
 
-func (m *Manager) errorPage(w http.ResponseWriter, msg string) {
+func (m *Manager) errorPage(w http.ResponseWriter, r *http.Request, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusBadGateway)
 	fmt.Fprintf(w,
@@ -341,5 +361,5 @@ func (m *Manager) errorPage(w http.ResponseWriter, msg string) {
 			`<body style="font-family:sans-serif;background:#1a1a2e;color:#fff;padding:40px">`+
 			`<h2 style="color:#ef4444">Could not open iDRAC</h2><p>%s</p>`+
 			`<p><a style="color:#60a5fa" href="%s/">&larr; Back to lab-manager</a></p>`,
-		html.EscapeString(msg), html.EscapeString(m.appBaseURL()))
+		html.EscapeString(msg), html.EscapeString(m.appBaseURL(r)))
 }

@@ -1,6 +1,10 @@
 package bmcproxy
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func newTestManager() *Manager {
 	return NewManager(fakeLookup{}, []byte("secret"), "pi.home.kilar.net")
@@ -37,10 +41,26 @@ func TestEnabledAndURLs(t *testing.T) {
 		t.Fatal("configured domain should be enabled")
 	}
 	tok := m.MintToken(3)
-	if got := m.AuthURL(3, tok); got != "https://idrac-3.pi.home.kilar.net/__labmgr/auth?token="+tok {
+
+	// Production: HTTPS, no port — must be byte-identical to the old behaviour.
+	if got := m.AuthURL("https", "lab.pi.home.kilar.net", 3, tok); got != "https://idrac-3.pi.home.kilar.net/__labmgr/auth?token="+tok {
 		t.Fatalf("AuthURL = %q", got)
 	}
-	if got := m.appBaseURL(); got != "https://lab.pi.home.kilar.net" {
+	httpsReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	httpsReq.Host = "idrac-3.pi.home.kilar.net"
+	httpsReq.Header.Set("X-Forwarded-Proto", "https")
+	if got := m.appBaseURL(httpsReq); got != "https://lab.pi.home.kilar.net" {
 		t.Fatalf("appBaseURL = %q", got)
+	}
+
+	// Development: plain HTTP on a non-default port. The scheme and port must
+	// carry through, or the handshake redirects off the dev server entirely.
+	if got := m.AuthURL("http", "127.0.0.1:5000", 3, tok); got != "http://idrac-3.pi.home.kilar.net:5000/__labmgr/auth?token="+tok {
+		t.Fatalf("dev AuthURL = %q", got)
+	}
+	devReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	devReq.Host = "idrac-3.pi.home.kilar.net:5000"
+	if got := m.appBaseURL(devReq); got != "http://lab.pi.home.kilar.net:5000" {
+		t.Fatalf("dev appBaseURL = %q", got)
 	}
 }

@@ -47,7 +47,13 @@ func TestKVMInitiatorRedirectsToProxySubdomain(t *testing.T) {
 	srv, c := proxyTestServer(t)
 	authenticateAndSeed(t, srv.URL, c) // logs in, clears gate, adds iDRAC server id 1 (root/calvin)
 
-	resp, err := c.Get(srv.URL + "/server/1/kvm")
+	// Behind Traefik the browser's scheme arrives as X-Forwarded-Proto, so the
+	// handshake must be minted as HTTPS. (The exact production host form —
+	// https, no port — is locked in bmcproxy.TestEnabledAndURLs; here the
+	// httptest listener necessarily carries a port.)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/server/1/kvm", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +63,30 @@ func TestKVMInitiatorRedirectsToProxySubdomain(t *testing.T) {
 		t.Fatalf("status=%d, want 302", resp.StatusCode)
 	}
 	loc := resp.Header.Get("Location")
-	if !strings.HasPrefix(loc, "https://idrac-1.pi.home.kilar.net/__labmgr/auth?token=") {
+	if !strings.HasPrefix(loc, "https://idrac-1.pi.home.kilar.net") ||
+		!strings.Contains(loc, "/__labmgr/auth?token=") {
 		t.Fatalf("KVM initiator Location = %q", loc)
+	}
+}
+
+// Over plain HTTP on a non-default port the handshake must stay on that scheme
+// and port. Hardcoding https here sent the browser to a host that does not
+// resolve in development, which is why the KVM path could only ever be
+// exercised in production.
+func TestKVMInitiatorKeepsDevSchemeAndPort(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+
+	resp, err := c.Get(srv.URL + "/server/1/kvm") // plain-HTTP httptest host:port
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	want := "http://idrac-1.pi.home.kilar.net:" + port + "/__labmgr/auth?token="
+	if loc := resp.Header.Get("Location"); !strings.HasPrefix(loc, want) {
+		t.Fatalf("dev KVM initiator Location = %q, want prefix %q", loc, want)
 	}
 }
 
@@ -71,6 +99,7 @@ func TestHostDispatchRoutesProxyAndApp(t *testing.T) {
 	// Proxy Host, no proxy session → proxy.Handler relays → bounce to initiator.
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/protected", nil)
 	req.Host = "idrac-1.pi.home.kilar.net"
+	req.Header.Set("X-Forwarded-Proto", "https")
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)

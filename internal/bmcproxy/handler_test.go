@@ -13,7 +13,13 @@ import (
 // proxyFront fronts m.Handler, letting the test set the proxy Host header.
 func proxyFront(t *testing.T, m *Manager) *httptest.Server {
 	t.Helper()
-	s := httptest.NewServer(http.HandlerFunc(m.Handler))
+	// Emulate the production edge: Traefik terminates TLS and forwards the
+	// original scheme. Without this the handshake is (correctly) treated as
+	// plain HTTP, which drops the Secure cookie flag.
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("X-Forwarded-Proto", "https")
+		m.Handler(w, r)
+	}))
 	t.Cleanup(s.Close)
 	return s
 }

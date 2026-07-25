@@ -106,7 +106,12 @@ func TestRelayConcurrentRotateIsRaceFree(t *testing.T) {
 func TestRelayWithoutCookieBounces(t *testing.T) {
 	front, _, _ := relayServer(t)
 	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := c.Get(front.URL + "/protected")
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/protected", nil)
+	// Production shape: canonical proxy host, TLS terminated at Traefik. The
+	// bounce back to the initiator must then be absolute HTTPS with no port.
+	req.Host = "idrac-1.pi.home.kilar.net"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

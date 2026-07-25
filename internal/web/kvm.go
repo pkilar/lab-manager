@@ -36,5 +36,5 @@ func (a *App) handleKVM(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("KVM proxy launch", "user_id", currentUser(r).ID, "server_id", id)
 	token := a.proxy.MintToken(id)
-	http.Redirect(w, r, a.proxy.AuthURL(id, token), http.StatusFound)
+	http.Redirect(w, r, a.proxy.AuthURL(requestScheme(r), r.Host, id, token), http.StatusFound)
 }
