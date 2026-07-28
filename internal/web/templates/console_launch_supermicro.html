@@ -95,59 +95,6 @@
             display: none;
             margin-top: 20px;
         }
-        .credentials-box {
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 10px;
-            padding: 20px;
-            margin-bottom: 20px;
-            text-align: left;
-        }
-        .credentials-box h3 {
-            font-size: 0.9rem;
-            color: #94a3b8;
-            margin-bottom: 15px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        .credential-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 12px;
-            padding: 10px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 6px;
-        }
-        .credential-row:last-child {
-            margin-bottom: 0;
-        }
-        .credential-label {
-            font-size: 0.8rem;
-            color: #94a3b8;
-            margin-bottom: 2px;
-        }
-        .credential-value {
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 1rem;
-            color: #fff;
-        }
-        .copy-btn {
-            padding: 6px 12px;
-            background: #4ade80;
-            color: #1a1a2e;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.8rem;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        .copy-btn:hover {
-            background: #22c55e;
-        }
-        .copy-btn.copied {
-            background: #60a5fa;
-        }
         .launch-btn {
             display: block;
             width: 100%;
@@ -199,10 +146,6 @@
             color: #94a3b8;
             margin-top: 15px;
         }
-        /* Hidden iframe for login */
-        #loginFrame {
-            display: none;
-        }
     </style>
 </head>
 <body>
@@ -225,30 +168,19 @@
             <p id="errorMessage">Unable to automatically log in. Please use manual login below.</p>
         </div>
 
-        <!-- Manual login fallback -->
+        {{/* Deliberately no credentials here: this page auto-logs-in, so
+             showing them made every launch a credential display. The 🔑 button
+             on the server list (/server/<id>/console/manual) is the way to see
+             them, matching the iDRAC flow. */}}
         <div class="manual-login" id="manualLogin">
-            {{if .HasUsername}}
-            <div class="credentials-box">
-                <h3>Login Credentials</h3>
-                <div class="credential-row">
-                    <div>
-                        <div class="credential-label">Username</div>
-                        <div class="credential-value">{{.Username}}</div>
-                    </div>
-                    <button class="copy-btn" onclick="copyToClipboard('{{.Username}}', this)">Copy</button>
-                </div>
-                <div class="credential-row">
-                    <div>
-                        <div class="credential-label">Password</div>
-                        <div class="credential-value">••••••••</div>
-                    </div>
-                    <button class="copy-btn" onclick="copyToClipboard('{{.Password}}', this)">Copy</button>
-                </div>
-            </div>
-            {{end}}
             <a href="{{.ConsoleURL}}" target="_blank" class="launch-btn">
                 Open Console Manually
             </a>
+            <p class="info-text">
+                Need to type the credentials in yourself?
+                <a href="/server/{{.ServerID}}/console/manual" target="_blank" rel="noopener"
+                    style="color: #4ade80;">Show credentials 🔑</a>
+            </p>
         </div>
 
         <div class="back-link">
@@ -256,22 +188,10 @@
         </div>
     </div>
 
-    <!-- Hidden iframe for login process -->
-    <iframe id="loginFrame" name="loginFrame"></iframe>
-
-    <!-- Hidden form for BMC login -->
-    <form id="loginForm" method="POST" action="{{.LoginURL}}" target="loginFrame" style="display: none;">
-        <input type="hidden" name="name" value="{{.Username}}">
-        <input type="hidden" name="pwd" value="{{.Password}}">
-    </form>
-
     <script>
         const BMC_IP = {{js .IPAddress}};
         const CONSOLE_URL = {{js .ConsoleURL}};
         const LOGIN_URL = {{js .LoginURL}};
-
-        let loginAttempted = false;
-        let loginTimeout = null;
 
         function updateStatus(message) {
             document.getElementById('statusMessage').textContent = message;
@@ -287,124 +207,6 @@
         function showManualLogin() {
             document.getElementById('statusBox').style.display = 'none';
             document.getElementById('manualLogin').style.display = 'block';
-        }
-
-        function copyToClipboard(text, button) {
-            function showCopied() {
-                const originalText = button.textContent;
-                button.textContent = 'Copied!';
-                button.classList.add('copied');
-                setTimeout(() => {
-                    button.textContent = originalText;
-                    button.classList.remove('copied');
-                }, 1500);
-            }
-
-            function legacyCopy(value) {
-                // Synchronous fallback using a temporary textarea +
-                // execCommand('copy'). MUST run inside the click handler
-                // (not from a Promise callback) or the browser will drop
-                // the operation for missing user activation.
-                const textarea = document.createElement('textarea');
-                textarea.value = value;
-                textarea.setAttribute('readonly', '');
-                textarea.style.position = 'fixed';
-                textarea.style.top = '0';
-                textarea.style.left = '0';
-                textarea.style.width = '2em';
-                textarea.style.height = '2em';
-                textarea.style.padding = '0';
-                textarea.style.border = 'none';
-                textarea.style.opacity = '0';
-                document.body.appendChild(textarea);
-                const previouslyFocused = document.activeElement;
-                textarea.focus();
-                textarea.select();
-                textarea.setSelectionRange(0, value.length); // iOS Safari
-                let ok = false;
-                try {
-                    ok = document.execCommand('copy');
-                } catch (e) {
-                    ok = false;
-                }
-                document.body.removeChild(textarea);
-                if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
-                    previouslyFocused.focus();
-                }
-                return ok;
-            }
-
-            // navigator.clipboard is only available in secure contexts
-            // (HTTPS / localhost / file://). Lab manager is commonly served
-            // over plain HTTP on a LAN, so fall back to execCommand('copy')
-            // SYNCHRONOUSLY when the modern API is unavailable. Waiting for
-            // the writeText() Promise to reject would lose the user
-            // activation window and cause the copy to silently fail.
-            if (!window.isSecureContext || !navigator.clipboard || !navigator.clipboard.writeText) {
-                if (legacyCopy(text)) {
-                    showCopied();
-                } else {
-                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
-                }
-                return;
-            }
-
-            navigator.clipboard.writeText(text).then(showCopied, function () {
-                if (legacyCopy(text)) {
-                    showCopied();
-                } else {
-                    window.prompt('Copy this value manually (Ctrl+C / Cmd+C):', text);
-                }
-            });
-        }
-
-        function attemptLogin() {
-            if (loginAttempted) return;
-            loginAttempted = true;
-
-            updateStatus('Authenticating...');
-
-            // Set a timeout - if login takes too long, show manual option
-            loginTimeout = setTimeout(() => {
-                showError('Login timed out. The BMC may be slow to respond or unreachable.');
-            }, 15000);
-
-            // Submit the login form to the hidden iframe
-            const form = document.getElementById('loginForm');
-            const iframe = document.getElementById('loginFrame');
-
-            // Listen for iframe load (indicates login response received)
-            iframe.onload = function() {
-                clearTimeout(loginTimeout);
-
-                // Give a brief moment for cookies to be set
-                setTimeout(() => {
-                    updateStatus('Login successful! Opening console...');
-
-                    // Open the console in a new window
-                    // The browser should now have the session cookie from the iframe login
-                    setTimeout(() => {
-                        window.open(CONSOLE_URL, '_blank');
-                        showManualLogin();
-                        document.getElementById('statusBox').style.display = 'block';
-                        document.getElementById('statusMessage').textContent = 'Console opened in new window';
-                        document.getElementById('spinner').style.display = 'none';
-                    }, 500);
-                }, 500);
-            };
-
-            iframe.onerror = function() {
-                clearTimeout(loginTimeout);
-                showError('Failed to connect to BMC. Please check network connectivity.');
-            };
-
-            // Submit the form
-            try {
-                form.submit();
-            } catch (e) {
-                clearTimeout(loginTimeout);
-                showError('Failed to submit login form: ' + e.message);
-            }
         }
 
         // Direct window navigation approach with console redirect

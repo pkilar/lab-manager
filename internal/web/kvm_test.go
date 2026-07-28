@@ -1,10 +1,13 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -173,8 +176,20 @@ func TestConsoleManualRedirectsToLaunch(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	loc := resp.Header.Get("Location")
-	if resp.StatusCode != http.StatusFound || !strings.HasPrefix(loc, "/server/1/console/launch?token=") {
+	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status=%d loc=%q", resp.StatusCode, loc)
+	}
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("Location %q: %v", loc, err)
+	}
+	if u.Path != "/server/1/console/launch" || u.Query().Get("token") == "" {
+		t.Fatalf("loc=%q, want a tokenised launch URL", loc)
+	}
+	// manual=1 tells the launch page to show credentials instead of driving an
+	// auto-login — the whole point of this route.
+	if u.Query().Get("manual") != "1" {
+		t.Errorf("loc=%q should carry manual=1", loc)
 	}
 	launchResp, page := get(t, c, srv.URL+loc)
 	if launchResp.StatusCode != http.StatusOK || !strings.Contains(page, "iDRAC") {
@@ -197,5 +212,117 @@ func TestKVMFallsBackToManualWhenUnavailable(t *testing.T) {
 		resp.Header.Get("Location") != "/server/1/console/manual" {
 		t.Fatalf("status=%d loc=%q, want 302 to the credentials page",
 			resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+// seedSupermicro adds a Supermicro server (id 2) to a store already seeded by
+// authenticateAndSeed, returning its id.
+func seedSupermicro(t *testing.T, base string, c *http.Client) int64 {
+	t.Helper()
+	_, nb := get(t, c, base+"/server/new")
+	mustRedirect(t, postForm(t, c, base+"/server/new", url.Values{
+		"name": {"smc-1"}, "ip_address": {"10.22.40.60"}, "bmc_type": {"supermicro"},
+		"ipmi_user": {"ADMIN"}, "ipmi_password": {"SUPERSECRET"},
+		"csrf_token": {csrfFrom(t, nb)},
+	}), "/")
+	return 2
+}
+
+// The Supermicro launch page logs in by submitting a form from the browser, so
+// the password is necessarily in the document — but it must not be DISPLAYED.
+// Showing it turned every console launch into a credential popup.
+func TestSupermicroLaunchDoesNotDisplayCredentials(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+	id := seedSupermicro(t, srv.URL, c)
+
+	page := supermicroLaunchPage(t, srv.URL, c, id, false)
+
+	// The auto-login form still needs the password, so assert on the visible
+	// credential UI rather than on the string itself.
+	for _, marker := range []string{"credentials-box", "credential-value", "copy-btn", "Login Credentials"} {
+		if strings.Contains(page, marker) {
+			t.Errorf("auto-login page still renders credential UI (%q)", marker)
+		}
+	}
+	// It must still be the auto-login page, not silently downgraded.
+	if !strings.Contains(page, "attemptDirectLogin") {
+		t.Error("auto-login page should still drive the browser-side login")
+	}
+	// And it must offer the way to the credentials.
+	if !strings.Contains(page, "/server/2/console/manual") {
+		t.Error("auto-login page should link to the credentials page")
+	}
+}
+
+// The 🔑 route must reach a page that actually shows the credentials — for
+// Supermicro that means the generic helper, not the auto-submitting page.
+func TestSupermicroManualShowsCredentials(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+	id := seedSupermicro(t, srv.URL, c)
+
+	page := supermicroLaunchPage(t, srv.URL, c, id, true)
+
+	if strings.Contains(page, "attemptDirectLogin") {
+		t.Error("manual page must not auto-login; that is what it exists to bypass")
+	}
+	for _, marker := range []string{"credentials-box", "ADMIN", "copyToClipboard"} {
+		if !strings.Contains(page, marker) {
+			t.Errorf("manual page should show credentials, missing %q", marker)
+		}
+	}
+}
+
+// supermicroLaunchPage fetches the launch page for id, either via the 🔑 route
+// (manual) or via the tokenised console API the Console button uses.
+func supermicroLaunchPage(t *testing.T, base string, c *http.Client, id int64, manual bool) string {
+	t.Helper()
+	sid := strconv.FormatInt(id, 10)
+	if manual {
+		resp, err := c.Get(base + "/server/" + sid + "/console/manual")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		loc := resp.Header.Get("Location")
+		if resp.StatusCode != http.StatusFound || loc == "" {
+			t.Fatalf("console/manual: status=%d loc=%q", resp.StatusCode, loc)
+		}
+		_, page := get(t, c, base+loc)
+		return page
+	}
+	// The Console button path: /console is JSON and returns the launch URL.
+	_, body := get(t, c, base+"/server/"+sid+"/console")
+	var api struct {
+		Success      bool   `json:"success"`
+		AutoLoginURL string `json:"auto_login_url"`
+	}
+	if err := json.Unmarshal([]byte(body), &api); err != nil {
+		t.Fatalf("decode console API: %v (body=%s)", err, body)
+	}
+	if !api.Success || api.AutoLoginURL == "" {
+		t.Fatalf("console API gave no auto-login URL: %s", body)
+	}
+	u, err := url.Parse(api.AutoLoginURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, page := get(t, c, base+u.Path+"?"+u.RawQuery)
+	return page
+}
+
+// The 🔑 button used to render only on proxy (iDRAC) rows. Now that no launch
+// page displays credentials, every vendor with credentials needs it.
+func TestKeyButtonRendersForEveryVendorWithCreds(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c) // iDRAC id 1
+	seedSupermicro(t, srv.URL, c)      // Supermicro id 2
+
+	_, body := get(t, c, srv.URL+"/")
+	for _, id := range []string{"1", "2"} {
+		if !strings.Contains(body, `href="/server/`+id+`/console/manual"`) {
+			t.Errorf("server %s row is missing the 🔑 credentials link", id)
+		}
 	}
 }

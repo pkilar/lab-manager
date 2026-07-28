@@ -440,7 +440,7 @@ func (a *App) handleConsoleManual(w http.ResponseWriter, r *http.Request) {
 	}
 	token := a.console.GenerateToken(id, currentUser(r).ID)
 	http.Redirect(w, r, "/server/"+strconv.FormatInt(id, 10)+
-		"/console/launch?token="+url.QueryEscape(token), http.StatusFound)
+		"/console/launch?manual=1&token="+url.QueryEscape(token), http.StatusFound)
 }
 
 func (a *App) handleServerConsole(w http.ResponseWriter, r *http.Request) {
@@ -504,10 +504,18 @@ func (a *App) handleConsoleLaunch(w http.ResponseWriter, r *http.Request) {
 	}
 	username, password := console.CredsFor(s)
 
+	// manual=1 comes from the 🔑 button: the user wants the credentials, not an
+	// auto-login. Only Supermicro branches on it, because only its launch page
+	// logs in by submitting a form from the browser — which is precisely what
+	// this path exists to skip. iDRAC's page does no auto-login of its own (the
+	// proxy does), and it reports whether the stored credentials still work,
+	// which is worth having on the copy/paste path rather than bypassing.
+	manual := r.URL.Query().Get("manual") == "1"
+
 	switch {
-	case s.BMCType == model.BMCSupermicro && cfg.SupportsAutoLogin:
+	case s.BMCType == model.BMCSupermicro && cfg.SupportsAutoLogin && !manual:
 		a.renderConsole(w, "console_launch_supermicro", consoleSupermicroData{
-			ServerName: s.Name, IPAddress: s.IPAddress,
+			ServerID: s.ID, ServerName: s.Name, IPAddress: s.IPAddress,
 			LoginURL: cfg.LoginURL, ConsoleURL: cfg.ConsoleURL,
 			Username: username, Password: password, HasUsername: username != "",
 		})

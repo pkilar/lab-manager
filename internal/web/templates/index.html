@@ -79,10 +79,11 @@
                         <a href="/server/{{.ID}}/sol/launch" target="_blank" rel="noopener"
                             class="btn btn-info btn-sm" title="IPMI Serial-over-LAN console">📟 Serial</a>
                         {{end}}
-                        {{if .ConsoleHref}}
-                        {{/* Auto-login can still fail (BMC unreachable, session
-                             table full); this is then the only way to the
-                             credentials. */}}
+                        {{if .HasCreds}}
+                        {{/* Every auto-login path can fail (BMC unreachable,
+                             session table full, credentials rotated), and none
+                             of them display credentials any more — so this is
+                             the way to them, for every vendor. */}}
                         <a href="/server/{{.ID}}/console/manual" target="_blank" rel="noopener"
                             class="btn btn-secondary btn-sm" title="Show credentials for manual login">🔑</a>
                         {{end}}

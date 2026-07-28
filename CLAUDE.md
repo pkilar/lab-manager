@@ -103,8 +103,9 @@ The most involved feature; understanding it requires reading several functions i
 1. `GET /server/<id>/console` issues a short-lived (`console.TokenValiditySeconds = 30`) HMAC-SHA256 token (`console.Manager.GenerateToken`, keyed by `LAB_MANAGER_SECRET_KEY`, bound to server_id + user_id + timestamp) and returns JSON with the `auto_login_url` (built from the external scheme/host).
 2. `GET /server/<id>/console/launch` verifies the token (`console.Manager.VerifyToken`, constant-time compare + expiry) and renders a BMC-specific launch page.
 
-`console.LoginConfigFor(server)` returns per-vendor login/console URLs (or nil when no credentials). Template selection by `bmc_type`:
-- **Supermicro** → `console_launch_supermicro.html` (browser-side form auto-submit to `/cgi/login.cgi`). There is intentionally no server-side Supermicro pre-authentication step — the launch is purely browser-side.
+`console.LoginConfigFor(server)` returns per-vendor login/console URLs (or nil when no credentials). Template selection by `bmc_type`, plus the `manual=1` query flag:
+- **Supermicro** → `console_launch_supermicro.html` (browser-side form auto-submit to `/cgi/login.cgi`). There is intentionally no server-side Supermicro pre-authentication step — the launch is purely browser-side. The page **does not display the credentials**: it auto-logs-in, so showing them made every launch a credential popup. The password is still in the document because the form POST needs it — that is inherent to the browser-side approach, so assert on the credential *UI* (not the string) when testing.
+- **`manual=1`** (set by `/console/manual`, the 🔑 button) skips only the auto-login machinery, so Supermicro falls through to the generic credentials helper. iDRAC deliberately ignores the flag: its page does no auto-login of its own (the proxy does) and it reports whether the stored credentials still work — worth keeping on the copy/paste path.
 - **iDRAC** → calls `console.Manager.PreAuthenticateIDRAC(server)` then renders `console_launch_idrac.html` with the auth result.
 - **else** → `console_launch.html` (manual credential helper with copy-to-clipboard).
 
@@ -114,7 +115,7 @@ The most involved feature; understanding it requires reading several functions i
 
 - **Web UI**: `/`, `/server/new`, `/server/<id>/edit`, `/server/<id>/delete`, `/server/<id>/power/<action>`, `/server/<id>/wol`, `/check-all-servers`
 - **API (JSON)**: `/api/server/<id>/power/<action>`, `/api/server/<id>/power/check`
-- **Console**: `/server/<id>/console`, `/server/<id>/console/launch`
+- **Console**: `/server/<id>/console` (JSON), `/server/<id>/console/launch`, `/server/<id>/console/manual` (the 🔑 button — mints a token and redirects to `launch?manual=1`; shown on every row with credentials, since no launch page displays them any more)
 - **Serial console (SOL)**: `/server/<id>/sol/launch` (xterm.js page), `/server/<id>/sol` (WebSocket; same-origin session auth + `Origin` check, gorilla/websocket)
 - **Static**: `/static/...` (embedded vendored xterm.js; no auth)
 - **iDRAC KVM proxy** (when `LAB_MANAGER_BMC_PROXY_DOMAIN` set): `/server/<id>/kvm` (login-gated initiator on the main host → mints a token, 302 to the subdomain) and, on `idrac-<id>.<domain>`, `/__labmgr/auth` (handshake) + transparent relay of everything else to the iDRAC

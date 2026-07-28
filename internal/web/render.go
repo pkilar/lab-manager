@@ -173,6 +173,7 @@ type consoleGenericData struct {
 }
 
 type consoleSupermicroData struct {
+	ServerID    int64
 	ServerName  string
 	IPAddress   string
 	LoginURL    string
