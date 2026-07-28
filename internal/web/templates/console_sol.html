@@ -23,6 +23,9 @@
     <div class="bar">
         <span>📟 Serial Console</span>
         <span class="name">{{.ServerName}}</span>
+        <!-- Shown always: a blank console is the symptom that sends you looking
+             for this setting, so the port in use is the first thing to check. -->
+        <span>SOL instance {{.SOLInstance}}</span>
         <span class="state" id="state">connecting…</span>
         <a href="/">← Back</a>
     </div>

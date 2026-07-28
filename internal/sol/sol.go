@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -31,11 +32,27 @@ func Creds(s *model.Server) (user, pass string, ok bool) {
 // activateArgs / deactivateArgs build the ipmitool argv. The password is NOT an
 // argv element — it is passed via the IPMI_PASSWORD env var and the -E flag, so
 // it never appears in `ps`.
-func activateArgs(ip, user string) []string   { return solArgs(ip, user, "activate") }
-func deactivateArgs(ip, user string) []string { return solArgs(ip, user, "deactivate") }
+func activateArgs(ip, user string, instance int) []string {
+	return solArgs(ip, user, "activate", instance)
+}
+func deactivateArgs(ip, user string, instance int) []string {
+	return solArgs(ip, user, "deactivate", instance)
+}
 
-func solArgs(ip, user, verb string) []string {
-	return []string{"-I", "lanplus", "-H", ip, "-U", user, "-E", "sol", verb}
+// solArgs appends `instance=<n>` only for non-default instances. ipmitool
+// already defaults to instance 1, so omitting it keeps the argv for the common
+// case byte-identical to what shipped before this option existed — no BMC that
+// works today can be broken by firmware that mishandles the explicit form.
+//
+// The instance must be passed to `deactivate` as well: without it a teardown
+// would release payload 1 and leave the session the user actually opened
+// pinned on the BMC, which allows only one at a time.
+func solArgs(ip, user, verb string, instance int) []string {
+	args := []string{"-I", "lanplus", "-H", ip, "-U", user, "-E", "sol", verb}
+	if instance > model.DefaultSOLInstance {
+		args = append(args, "instance="+strconv.Itoa(instance))
+	}
+	return args
 }
 
 // ErrNoCreds is returned by Start when the server has no usable credentials.
@@ -86,6 +103,7 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 	if !ok {
 		return nil, ErrNoCreds
 	}
+	instance := s.SOLInstanceOrDefault()
 	ctx, cancel := context.WithCancel(ctx)
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
@@ -98,15 +116,15 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 
 	go func() {
 		// Clear a possibly-leaked prior payload (single-session per BMC).
-		_ = m.run.Run(ctx, deactivateArgs(s.IPAddress, user), env, nil, io.Discard)
+		_ = m.run.Run(ctx, deactivateArgs(s.IPAddress, user, instance), env, nil, io.Discard)
 		// Run the console until ctx is cancelled or ipmitool exits. The exit
 		// error is intentionally discarded: a normal disconnect kills ipmitool
 		// (signal: killed), which is not a failure, and stderr is already
 		// streamed to the terminal.
-		_ = m.run.Run(ctx, activateArgs(s.IPAddress, user), env, inR, outW)
+		_ = m.run.Run(ctx, activateArgs(s.IPAddress, user, instance), env, inR, outW)
 		// Release the BMC payload even though ctx is now (usually) cancelled.
 		cleanupCtx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		_ = m.run.Run(cleanupCtx, deactivateArgs(s.IPAddress, user), env, nil, io.Discard)
+		_ = m.run.Run(cleanupCtx, deactivateArgs(s.IPAddress, user, instance), env, nil, io.Discard)
 		ccancel()
 		_ = outW.CloseWithError(io.EOF) // EOF to the Output reader
 		// Also close stdin: if ipmitool exited on its own (no Close() yet), this

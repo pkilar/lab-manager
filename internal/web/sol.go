@@ -41,7 +41,9 @@ func (a *App) handleSOLLaunch(w http.ResponseWriter, r *http.Request) {
 		a.notFoundOrError(w, r, err)
 		return
 	}
-	a.renderConsole(w, "console_sol", consoleSOLData{ServerID: s.ID, ServerName: s.Name})
+	a.renderConsole(w, "console_sol", consoleSOLData{
+		ServerID: s.ID, ServerName: s.Name, SOLInstance: s.SOLInstanceOrDefault(),
+	})
 }
 
 // handleSOLSocket upgrades to a WebSocket and bridges it to an SOL session:

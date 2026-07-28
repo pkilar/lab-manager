@@ -25,7 +25,7 @@ type Store struct {
 	cipher *secret.Fernet
 }
 
-const serverColumns = `id, name, ip_address, bmc_type, redfish_user, redfish_password, ipmi_user, ipmi_password, mac_address, status, last_updated, notes`
+const serverColumns = `id, name, ip_address, bmc_type, redfish_user, redfish_password, ipmi_user, ipmi_password, mac_address, status, last_updated, notes, sol_instance`
 
 // Open connects to the SQLite database at dbPath, applies migrations, and
 // returns a ready Store.
@@ -58,9 +58,9 @@ func Open(dbPath string, cipher *secret.Fernet) (*Store, error) {
 func (st *Store) Close() error { return st.db.Close() }
 
 // migrate creates the tables for a fresh database and additively backfills
-// columns that older databases may be missing — the two columns
-// (user.password_change_required and server.bmc_type) added after the initial
-// schema.
+// columns that older databases may be missing — the columns
+// (user.password_change_required, server.bmc_type, server.sol_instance) added
+// after the initial schema.
 func (st *Store) migrate() error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS server (
@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS server (
 	mac_address TEXT,
 	status TEXT DEFAULT 'Off',
 	last_updated DATETIME,
-	notes TEXT
+	notes TEXT,
+	sol_instance INTEGER DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS user (
 	id INTEGER PRIMARY KEY,
@@ -90,6 +91,11 @@ CREATE TABLE IF NOT EXISTS user (
 		return err
 	}
 	if err := st.addColumnIfMissing("server", "bmc_type", "TEXT DEFAULT 'generic'"); err != nil {
+		return err
+	}
+	// Existing rows get NULL rather than the DEFAULT (SQLite only applies it to
+	// new inserts), so scanServer must tolerate NULL here.
+	if err := st.addColumnIfMissing("server", "sol_instance", "INTEGER DEFAULT 1"); err != nil {
 		return err
 	}
 	return nil
@@ -164,8 +170,9 @@ func (st *Store) scanServer(sc scanner) (*model.Server, error) {
 	var s model.Server
 	var (
 		bmc, rfUser, rfPass, ipmiUser, ipmiPass, mac, status, lastUpdated, notes sql.NullString
+		solInstance                                                              sql.NullInt64
 	)
-	err := sc.Scan(&s.ID, &s.Name, &s.IPAddress, &bmc, &rfUser, &rfPass, &ipmiUser, &ipmiPass, &mac, &status, &lastUpdated, &notes)
+	err := sc.Scan(&s.ID, &s.Name, &s.IPAddress, &bmc, &rfUser, &rfPass, &ipmiUser, &ipmiPass, &mac, &status, &lastUpdated, &notes, &solInstance)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +187,7 @@ func (st *Store) scanServer(sc scanner) (*model.Server, error) {
 	s.MACAddress = mac.String
 	s.Status = status.String
 	s.Notes = notes.String
+	s.SOLInstance = int(solInstance.Int64) // NULL on pre-migration rows → 0 → SOLInstanceOrDefault
 	if lastUpdated.Valid {
 		s.LastUpdated = parseDBTime(lastUpdated.String)
 	}
@@ -223,10 +231,10 @@ func (st *Store) CreateServer(s *model.Server) error {
 		return err
 	}
 	res, err := st.db.Exec(
-		`INSERT INTO server (name, ip_address, bmc_type, redfish_user, redfish_password, ipmi_user, ipmi_password, mac_address, status, last_updated, notes)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO server (name, ip_address, bmc_type, redfish_user, redfish_password, ipmi_user, ipmi_password, mac_address, status, last_updated, notes, sol_instance)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.Name, s.IPAddress, s.BMCType, nullStr(s.RedfishUser), rfPass, nullStr(s.IPMIUser), ipmiPass,
-		nullStr(s.MACAddress), s.Status, formatDBTime(s.LastUpdated), nullStr(s.Notes),
+		nullStr(s.MACAddress), s.Status, formatDBTime(s.LastUpdated), nullStr(s.Notes), s.SOLInstanceOrDefault(),
 	)
 	if err != nil {
 		return err
@@ -246,10 +254,12 @@ func (st *Store) UpdateServer(s *model.Server, setRedfishPw, setIPMIPw bool) err
 	set := []string{
 		"name = ?", "ip_address = ?", "bmc_type = ?", "redfish_user = ?",
 		"ipmi_user = ?", "mac_address = ?", "status = ?", "last_updated = ?", "notes = ?",
+		"sol_instance = ?",
 	}
 	args := []any{
 		s.Name, s.IPAddress, s.BMCType, nullStr(s.RedfishUser),
 		nullStr(s.IPMIUser), nullStr(s.MACAddress), s.Status, formatDBTime(s.LastUpdated), nullStr(s.Notes),
+		s.SOLInstanceOrDefault(),
 	}
 	if setRedfishPw {
 		enc, err := st.encryptCredential(s.RedfishPassword)

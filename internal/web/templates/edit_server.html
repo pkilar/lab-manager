@@ -52,6 +52,15 @@
                     {{end}}
                 </div>
                 <div class="form-group">
+                    <label for="sol_instance">Serial Console Port</label>
+                    <input type="number" id="sol_instance" name="sol_instance" min="1" max="15"
+                        value="{{.Server.SOLInstance}}">
+                    <small style="color: #666;">IPMI SOL payload instance used by the Serial Console. <strong>1</strong> is
+                        the first serial port (COM1) and suits most servers; use <strong>2</strong> for COM2, or the node
+                        number on multi-node chassis. On Dell, which COM the BMC redirects is set in BIOS under Serial
+                        Communication.</small>
+                </div>
+                <div class="form-group">
                     <label for="mac_address">MAC Address (for Wake-on-LAN)</label>
                     <input type="text" id="mac_address" name="mac_address" value="{{.Server.MACAddress}}" placeholder="AA:BB:CC:DD:EE:FF">
                     {{if not .WolEnabled}}

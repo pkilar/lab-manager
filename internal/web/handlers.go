@@ -112,6 +112,7 @@ type serverForm struct {
 	Name, IPAddress, MAC, BMCType                        string
 	RedfishUser, RedfishPassword, IPMIUser, IPMIPassword string
 	Notes                                                string
+	SOLInstance                                          int
 }
 
 // parseServerForm reads and validates the shared add/edit form. On invalid
@@ -129,6 +130,8 @@ func parseServerForm(r *http.Request) (serverForm, string) {
 		IPMIPassword:    r.PostFormValue("ipmi_password"),
 		Notes:           r.PostFormValue("notes"),
 	}
+	solInstance, solOK := parseSOLInstance(r.PostFormValue("sol_instance"))
+	f.SOLInstance = solInstance
 	switch {
 	case f.Name == "":
 		return f, "Server name is required"
@@ -136,6 +139,8 @@ func parseServerForm(r *http.Request) (serverForm, string) {
 		return f, "Invalid IP address format"
 	case f.MAC != "" && !validateMACAddress(f.MAC):
 		return f, "Invalid MAC address format (use AA:BB:CC:DD:EE:FF)"
+	case !solOK:
+		return f, "Serial console port must be a number from 1 to 15"
 	}
 	if !model.ValidBMCType(f.BMCType) {
 		f.BMCType = model.BMCGeneric
@@ -194,6 +199,7 @@ func (a *App) handleNewServer(w http.ResponseWriter, r *http.Request) {
 			RedfishUser: f.RedfishUser, RedfishPassword: f.RedfishPassword,
 			IPMIUser: f.IPMIUser, IPMIPassword: f.IPMIPassword,
 			MACAddress: f.MAC, Status: "Off", LastUpdated: time.Now().UTC(), Notes: f.Notes,
+			SOLInstance: f.SOLInstance,
 		}
 		if err := a.store.CreateServer(s); err != nil {
 			a.serverError(w, r, err)
@@ -239,6 +245,7 @@ func (a *App) updateServer(w http.ResponseWriter, r *http.Request, s *model.Serv
 	s.IPMIUser = f.IPMIUser
 	s.MACAddress = f.MAC
 	s.Notes = f.Notes
+	s.SOLInstance = f.SOLInstance
 	s.LastUpdated = time.Now().UTC()
 
 	// Credential rules, per protocol (Redfish / IPMI):
@@ -598,6 +605,7 @@ func (a *App) renderEdit(w http.ResponseWriter, r *http.Request, s *model.Server
 		Server: editServerRow{
 			ID: s.ID, Name: s.Name, IPAddress: s.IPAddress, BMCType: s.BMCType,
 			RedfishUser: s.RedfishUser, IPMIUser: s.IPMIUser, MACAddress: s.MACAddress, Notes: s.Notes,
+			SOLInstance:    s.SOLInstanceOrDefault(),
 			HasRedfishUser: s.RedfishUser != "", HasIPMIUser: s.IPMIUser != "",
 		},
 	})

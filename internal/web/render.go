@@ -156,6 +156,7 @@ type editServerRow struct {
 	IPMIUser       string
 	MACAddress     string
 	Notes          string
+	SOLInstance    int
 	HasRedfishUser bool
 	HasIPMIUser    bool
 }
@@ -193,6 +194,7 @@ type consoleIdracData struct {
 }
 
 type consoleSOLData struct {
-	ServerID   int64
-	ServerName string
+	ServerID    int64
+	ServerName  string
+	SOLInstance int
 }

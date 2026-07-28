@@ -33,6 +33,15 @@ func ValidBMCType(t string) bool {
 	return false
 }
 
+// IPMI SOL payload instance bounds. The instance selects which serial port the
+// BMC redirects over Serial-over-LAN — instance 1 is the first port (COM1),
+// which is why it is the default. ipmitool enforces the same range and rejects
+// anything outside it with "Instance must range from 1 to 15".
+const (
+	DefaultSOLInstance = 1
+	MaxSOLInstance     = 15
+)
+
 // Server represents a row of the `server` table. The password fields hold DECRYPTED
 // plaintext in memory; the store encrypts them on write and decrypts on read, so
 // only ciphertext is ever persisted.
@@ -49,6 +58,20 @@ type Server struct {
 	Status          string
 	LastUpdated     time.Time // UTC; the zero value means "never updated"
 	Notes           string
+	// SOLInstance is the IPMI SOL payload instance for the serial console; 0
+	// means "not set" (rows written before the column existed). Read it through
+	// SOLInstanceOrDefault rather than directly.
+	SOLInstance int
+}
+
+// SOLInstanceOrDefault returns the serial console's payload instance, falling
+// back to instance 1 for unset or out-of-range values so a bad stored number
+// can never produce an ipmitool argument that fails the session outright.
+func (s *Server) SOLInstanceOrDefault() int {
+	if s.SOLInstance < DefaultSOLInstance || s.SOLInstance > MaxSOLInstance {
+		return DefaultSOLInstance
+	}
+	return s.SOLInstance
 }
 
 // User mirrors a row of the `user` table.

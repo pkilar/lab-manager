@@ -118,3 +118,89 @@ func TestGetServerNotFound(t *testing.T) {
 		t.Fatalf("GetServer(missing) err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestSOLInstanceRoundTrips(t *testing.T) {
+	st := openTempStore(t)
+	s := &model.Server{Name: "twin-node-b", IPAddress: "10.0.0.9", SOLInstance: 2}
+	if err := st.CreateServer(s); err != nil {
+		t.Fatalf("CreateServer: %v", err)
+	}
+	got, err := st.GetServer(s.ID)
+	if err != nil {
+		t.Fatalf("GetServer: %v", err)
+	}
+	if got.SOLInstance != 2 {
+		t.Fatalf("SOLInstance after create = %d, want 2", got.SOLInstance)
+	}
+
+	got.SOLInstance = 15
+	if err := st.UpdateServer(got, false, false); err != nil {
+		t.Fatalf("UpdateServer: %v", err)
+	}
+	got, err = st.GetServer(s.ID)
+	if err != nil {
+		t.Fatalf("GetServer: %v", err)
+	}
+	if got.SOLInstance != 15 {
+		t.Fatalf("SOLInstance after update = %d, want 15", got.SOLInstance)
+	}
+}
+
+// A server created without an explicit instance must persist the default rather
+// than 0, which would emit `instance=0` and be rejected by ipmitool.
+func TestCreateServerDefaultsSOLInstance(t *testing.T) {
+	st := openTempStore(t)
+	s := &model.Server{Name: "r630", IPAddress: "10.0.0.10"} // SOLInstance left zero
+	if err := st.CreateServer(s); err != nil {
+		t.Fatalf("CreateServer: %v", err)
+	}
+	got, err := st.GetServer(s.ID)
+	if err != nil {
+		t.Fatalf("GetServer: %v", err)
+	}
+	if got.SOLInstance != model.DefaultSOLInstance {
+		t.Fatalf("SOLInstance = %d, want %d", got.SOLInstance, model.DefaultSOLInstance)
+	}
+}
+
+// The live instance/servers.db predates sol_instance. Opening such a database
+// must add the column and leave the existing row readable — SQLite backfills
+// ALTER TABLE ... ADD COLUMN with NULL, not with the DEFAULT, so the scan has to
+// tolerate NULL and fall back to instance 1.
+func TestMigrationAddsSOLInstanceToExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+
+	pre := openStoreAtPath(t, path)
+	if _, err := pre.db.Exec("ALTER TABLE server DROP COLUMN sol_instance"); err != nil {
+		t.Fatalf("simulate pre-migration schema: %v", err)
+	}
+	if _, err := pre.db.Exec(
+		"INSERT INTO server (name, ip_address, bmc_type, status) VALUES ('legacy', '10.0.0.11', 'idrac', 'Off')",
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err := pre.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	st := openStoreAtPath(t, path) // migrate() runs here
+	servers, err := st.AllServers()
+	if err != nil {
+		t.Fatalf("AllServers after migration: %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("got %d servers, want 1", len(servers))
+	}
+	if got := servers[0].SOLInstanceOrDefault(); got != model.DefaultSOLInstance {
+		t.Fatalf("migrated row SOLInstanceOrDefault = %d, want %d", got, model.DefaultSOLInstance)
+	}
+}
+
+func openStoreAtPath(t *testing.T, path string) *Store {
+	t.Helper()
+	st, err := Open(path, testFernet(t))
+	if err != nil {
+		t.Fatalf("Open(%s): %v", path, err)
+	}
+	return st
+}

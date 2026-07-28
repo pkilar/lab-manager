@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/pkilar/lab-manager/internal/console"
+	"github.com/pkilar/lab-manager/internal/model"
 )
 
 func TestTemplatesRenderAllPages(t *testing.T) {
@@ -151,5 +152,30 @@ func TestRequestScheme(t *testing.T) {
 				t.Fatalf("requestScheme = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestParseSOLInstance(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"", model.DefaultSOLInstance, true}, // unspecified: every existing server
+		{"1", 1, true},
+		{"2", 2, true},
+		{" 2 ", 2, true},
+		{"15", 15, true}, // ipmitool's documented ceiling
+		{"0", 0, false},  // ipmitool: "Instance must range from 1 to 15"
+		{"16", 0, false}, // one past the ceiling
+		{"-1", 0, false},
+		{"COM2", 0, false},        // the label, not the value
+		{"2; rm -rf /", 0, false}, // never reaches argv, but reject loudly
+	}
+	for _, c := range cases {
+		got, ok := parseSOLInstance(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("parseSOLInstance(%q) = (%d, %v), want (%d, %v)", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }

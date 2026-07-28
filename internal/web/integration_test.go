@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pkilar/lab-manager/internal/model"
 	"github.com/pkilar/lab-manager/internal/secret"
 	"github.com/pkilar/lab-manager/internal/store"
 )
@@ -255,5 +256,58 @@ func TestEditCredentialRules(t *testing.T) {
 	}
 	if s3.IPMIUser != "root" || s3.IPMIPassword != "secret" {
 		t.Fatalf("blank ipmi password should keep current: user=%q pw=%q", s3.IPMIUser, s3.IPMIPassword)
+	}
+}
+
+// TestEditSOLInstance covers the serial console port end-to-end over HTTP: a
+// valid value persists, and an out-of-range one is refused without corrupting
+// the stored setting (a silently-clamped value would open the console on the
+// wrong port and read as a BMC fault).
+func TestEditSOLInstance(t *testing.T) {
+	srv, c, st := testServer(t)
+	authenticateAndSeed(t, srv.URL, c) // server 1, no explicit instance
+
+	if s, err := st.GetServer(1); err != nil {
+		t.Fatal(err)
+	} else if s.SOLInstance != model.DefaultSOLInstance {
+		t.Fatalf("seeded instance = %d, want %d", s.SOLInstance, model.DefaultSOLInstance)
+	}
+
+	// Move the console to COM2.
+	_, eb := get(t, c, srv.URL+"/server/1/edit")
+	mustRedirect(t, postForm(t, c, srv.URL+"/server/1/edit", url.Values{
+		"name": {"r630"}, "ip_address": {"10.22.40.50"}, "bmc_type": {"idrac"},
+		"redfish_user": {"root"}, "redfish_password": {""},
+		"sol_instance": {"2"}, "csrf_token": {csrfFrom(t, eb)},
+	}), "/")
+
+	s2, err := st.GetServer(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.SOLInstance != 2 {
+		t.Fatalf("SOLInstance after edit = %d, want 2", s2.SOLInstance)
+	}
+
+	// Out of range: re-renders the form (200, not a redirect) and changes nothing.
+	_, eb2 := get(t, c, srv.URL+"/server/1/edit")
+	resp := postForm(t, c, srv.URL+"/server/1/edit", url.Values{
+		"name": {"r630"}, "ip_address": {"10.22.40.50"}, "bmc_type": {"idrac"},
+		"redfish_user": {"root"}, "redfish_password": {""},
+		"sol_instance": {"99"}, "csrf_token": {csrfFrom(t, eb2)},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("invalid instance: status=%d, want 200 (re-rendered form)", resp.StatusCode)
+	}
+	if b := readBody(t, resp); !strings.Contains(b, "Serial console port must be a number from 1 to 15") {
+		t.Error("invalid instance should explain the accepted range")
+	}
+
+	s3, err := st.GetServer(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s3.SOLInstance != 2 {
+		t.Fatalf("rejected edit changed the stored instance to %d, want 2 unchanged", s3.SOLInstance)
 	}
 }
