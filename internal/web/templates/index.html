@@ -149,8 +149,10 @@
             .then(response => response.json())
             .then(data => {
                 if (data.success && data.auto_login_url) {
-                    // Open the auto-login page which will handle BMC authentication
-                    const consoleWindow = window.open(data.auto_login_url, '_blank', 'width=600,height=400');
+                    // A full tab, not a sized popup: the launch page navigates
+                    // itself to the console once the BMC session is established,
+                    // so this tab IS the console window.
+                    const consoleWindow = window.open(data.auto_login_url, '_blank');
                     if (!consoleWindow) {
                         alert('Pop-up blocked! Please allow pop-ups for this site.\n\n' +
                             'You can also open the console by clicking this link:\n' +

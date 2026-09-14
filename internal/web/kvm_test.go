@@ -405,28 +405,55 @@ func TestKVMStillDegradesForNonIDRAC(t *testing.T) {
 	}
 }
 
-// The Supermicro launch page is a relay: it POSTs the login into the console
-// window and has no reason to survive. Leaving it open meant every launch ended
-// with two windows, the spare one being a page about credentials.
-func TestSupermicroRelayClosesItself(t *testing.T) {
+// The Supermicro launch page is a relay. It must end as the console itself,
+// leaving no spare window: browsers refuse window.close() on a page that did not
+// script-open itself, so the earlier shape (helper becomes console, relay closes
+// itself) left the relay on screen. Closing a window you opened is always
+// permitted, so the helper is the throwaway now.
+func TestSupermicroRelayBecomesTheConsole(t *testing.T) {
 	srv, c := proxyTestServer(t)
 	authenticateAndSeed(t, srv.URL, c)
 	id := seedSupermicro(t, srv.URL, c)
 
 	page := supermicroLaunchPage(t, srv.URL, c, id, false)
-	if !strings.Contains(page, "window.close()") {
-		t.Error("the relay must close itself once the console window is handed off")
+
+	if !strings.Contains(page, "helper.close()") {
+		t.Error("the helper window must be closed once the cookie is set")
 	}
-	// It must close only AFTER navigating the console window, or the handoff
-	// dies with the page.
-	closeAt := strings.Index(page, "window.close()")
-	navAt := strings.Index(page, "bmcWindow.location.href = CONSOLE_URL")
-	if navAt < 0 || closeAt < navAt {
-		t.Errorf("window.close() at %d must come after the console navigation at %d", closeAt, navAt)
+	if !strings.Contains(page, "window.location.href = CONSOLE_URL") {
+		t.Error("the relay must navigate itself to the console")
 	}
-	// If the browser refuses to close, the fallback must still appear.
-	if !strings.Contains(page, "showManualLogin();") {
-		t.Error("a refused close must fall back to the manual UI, not a dead spinner")
+	// Self-close is the primitive browsers refuse; it must not come back.
+	if strings.Contains(page, "window.close()") {
+		t.Error("window.close() on self is refused by browsers; do not rely on it")
+	}
+	// Order matters: close the helper, then navigate. Navigating first would
+	// destroy the script before it can close anything.
+	closeAt := strings.Index(page, "helper.close()")
+	navAt := strings.Index(page, "window.location.href = CONSOLE_URL")
+	if closeAt < 0 || navAt < 0 || closeAt > navAt {
+		t.Errorf("helper.close() at %d must precede the navigation at %d", closeAt, navAt)
+	}
+	// The login POST must target the helper, not this page: posting to _self
+	// would strand us on the BMC with no way to reach the console.
+	if !strings.Contains(page, "form.target = 'supermicro_login'") {
+		t.Error("the login form must post into the helper window")
+	}
+}
+
+// The Console button must open a full tab, not a sized popup, because that tab
+// becomes the console. A 600x400 KVM window is unusable.
+func TestConsoleOpensFullTabNotSizedPopup(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+	seedSupermicro(t, srv.URL, c)
+
+	_, body := get(t, c, srv.URL+"/")
+	if strings.Contains(body, "width=600,height=400") {
+		t.Error("Console must not open a sized popup; that window becomes the console")
+	}
+	if !strings.Contains(body, "window.open(data.auto_login_url, '_blank')") {
+		t.Error("Console should open a plain new tab")
 	}
 }
 
