@@ -260,32 +260,19 @@
                 }
 
                 setTimeout(() => {
-                    updateStatus('Console opened');
+                    // The relay has done its only job: POST the login into the
+                    // console window. Close it, so the user is left with the
+                    // console alone instead of a second window they have to
+                    // dismiss. Permitted because openConsole() opened this page
+                    // with window.open().
+                    window.close();
+
+                    // Still here? The browser refused to close us (the page was
+                    // opened by navigation rather than script, or a policy
+                    // blocks it). Show the fallback rather than leave a dead
+                    // spinner on screen.
+                    updateStatus('Console opened in a separate window');
                     document.getElementById('spinner').style.display = 'none';
-
-                    // Update info text with a link to console
-                    const statusBox = document.getElementById('statusBox');
-                    const infoText = statusBox.querySelector('.info-text');
-
-                    // Clear existing content
-                    while (infoText.firstChild) {
-                        infoText.removeChild(infoText.firstChild);
-                    }
-
-                    // Add text node
-                    infoText.appendChild(document.createTextNode('Console should be open in the BMC window. '));
-
-                    // Add link using safe DOM methods
-                    const consoleLink = document.createElement('a');
-                    consoleLink.href = CONSOLE_URL;
-                    consoleLink.target = 'supermicro_bmc';
-                    consoleLink.style.color = '#4ade80';
-                    consoleLink.style.textDecoration = 'underline';
-                    consoleLink.textContent = 'Click here to open console';
-                    infoText.appendChild(consoleLink);
-
-                    infoText.appendChild(document.createTextNode(' if it did not open automatically.'));
-
                     showManualLogin();
                 }, 1500);
             }, 2000);

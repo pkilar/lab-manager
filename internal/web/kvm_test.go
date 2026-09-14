@@ -404,3 +404,48 @@ func TestKVMStillDegradesForNonIDRAC(t *testing.T) {
 			resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
+
+// The Supermicro launch page is a relay: it POSTs the login into the console
+// window and has no reason to survive. Leaving it open meant every launch ended
+// with two windows, the spare one being a page about credentials.
+func TestSupermicroRelayClosesItself(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+	id := seedSupermicro(t, srv.URL, c)
+
+	page := supermicroLaunchPage(t, srv.URL, c, id, false)
+	if !strings.Contains(page, "window.close()") {
+		t.Error("the relay must close itself once the console window is handed off")
+	}
+	// It must close only AFTER navigating the console window, or the handoff
+	// dies with the page.
+	closeAt := strings.Index(page, "window.close()")
+	navAt := strings.Index(page, "bmcWindow.location.href = CONSOLE_URL")
+	if navAt < 0 || closeAt < navAt {
+		t.Errorf("window.close() at %d must come after the console navigation at %d", closeAt, navAt)
+	}
+	// If the browser refuses to close, the fallback must still appear.
+	if !strings.Contains(page, "showManualLogin();") {
+		t.Error("a refused close must fall back to the manual UI, not a dead spinner")
+	}
+}
+
+// Console pages can carry BMC credentials; they must never be cached.
+func TestConsolePagesAreNotCached(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+
+	resp, err := c.Get(srv.URL + "/server/1/console/manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	launch, err := c.Get(srv.URL + resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = launch.Body.Close()
+	if cc := launch.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("credentials page Cache-Control = %q, want no-store", cc)
+	}
+}

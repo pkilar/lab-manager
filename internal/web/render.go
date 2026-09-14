@@ -87,6 +87,10 @@ func (a *App) renderConsole(w http.ResponseWriter, name string, data any) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Console pages are the only ones that can carry BMC credentials (the 🔑
+	// page shows them; the Supermicro relay posts them from JS). Keep them out
+	// of the browser's disk cache, and out of any intermediary's.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
 }
