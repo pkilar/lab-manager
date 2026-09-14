@@ -326,3 +326,81 @@ func TestKeyButtonRendersForEveryVendorWithCreds(t *testing.T) {
 		}
 	}
 }
+
+// For a vendor with no auto-login, the Console launch page was byte-for-byte the
+// 🔑 page — so "Console" popped up a credential list instead of opening a
+// console. Console must now link to the BMC's own UI, leaving credentials to 🔑.
+func TestConsoleButtonSkipsCredentialPageWithoutAutoLogin(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c) // iDRAC id 1
+
+	_, nb := get(t, c, srv.URL+"/server/new")
+	mustRedirect(t, postForm(t, c, srv.URL+"/server/new", url.Values{
+		"name": {"generic-box"}, "ip_address": {"10.99.0.9"}, "bmc_type": {"generic"},
+		"ipmi_user": {"ADMIN"}, "ipmi_password": {"SECRET123"},
+		"csrf_token": {csrfFrom(t, nb)},
+	}), "/")
+
+	_, body := get(t, c, srv.URL+"/")
+	if !strings.Contains(body, `href="https://10.99.0.9/"`) {
+		t.Error("Console on a no-auto-login row should link straight to the BMC UI")
+	}
+	// It must not fall back to the token flow, which lands on the credentials page.
+	if strings.Contains(body, `onclick="openConsole( 2`) {
+		t.Error("a no-auto-login row should not use the token flow for Console")
+	}
+	// The 🔑 button stays: that is where credentials belong.
+	if !strings.Contains(body, `href="/server/2/console/manual"`) {
+		t.Error("the credentials button must still render")
+	}
+	// The tooltip must not claim an auto-login it cannot perform.
+	if strings.Contains(body, `title="Opens the BMC already logged in">Console</a>`) &&
+		!strings.Contains(body, `href="/server/1/kvm"`) {
+		t.Error("tooltip claims auto-login on a row that has none")
+	}
+}
+
+// Supermicro genuinely auto-logs-in from the browser, so it must keep the
+// tokenised flow rather than being downgraded to a plain BMC link.
+func TestConsoleButtonKeepsTokenFlowForSupermicro(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+	seedSupermicro(t, srv.URL, c) // id 2, 10.22.40.60
+
+	_, body := get(t, c, srv.URL+"/")
+	if !strings.Contains(body, `onclick="openConsole( 2`) {
+		t.Error("Supermicro must keep the token flow so its auto-login page runs")
+	}
+	if strings.Contains(body, `href="https://10.22.40.60/`) {
+		t.Error("Supermicro must not be downgraded to a plain BMC link")
+	}
+}
+
+// kvm.go guards on kvmTarget, not consoleTarget: now that consoleTarget returns
+// a BMC URL for non-iDRAC vendors, reusing it there would have sent a generic
+// server into the iDRAC proxy handshake instead of degrading to credentials.
+func TestKVMStillDegradesForNonIDRAC(t *testing.T) {
+	srv, c := proxyTestServer(t)
+	authenticateAndSeed(t, srv.URL, c)
+
+	// Must be a vendor whose consoleTarget is NON-empty, or the test cannot tell
+	// the two guards apart: Supermicro returns "" from both. A generic row now
+	// yields the BMC URL, so guarding on consoleTarget would wrongly proceed.
+	_, nb := get(t, c, srv.URL+"/server/new")
+	mustRedirect(t, postForm(t, c, srv.URL+"/server/new", url.Values{
+		"name": {"generic-box"}, "ip_address": {"10.99.0.9"}, "bmc_type": {"generic"},
+		"ipmi_user": {"ADMIN"}, "ipmi_password": {"SECRET123"},
+		"csrf_token": {csrfFrom(t, nb)},
+	}), "/")
+
+	resp, err := c.Get(srv.URL + "/server/2/kvm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound ||
+		resp.Header.Get("Location") != "/server/2/console/manual" {
+		t.Fatalf("/kvm on a non-iDRAC row: status=%d loc=%q, want 302 to /console/manual",
+			resp.StatusCode, resp.Header.Get("Location"))
+	}
+}

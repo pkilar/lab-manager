@@ -159,15 +159,16 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	rows := make([]serverRow, 0, len(servers))
 	for _, s := range servers {
 		row := serverRow{
-			ID:          s.ID,
-			Name:        s.Name,
-			IPAddress:   s.IPAddress,
-			BMCType:     s.BMCType,
-			HasCreds:    s.RedfishUser != "" || s.IPMIUser != "",
-			ConsoleHref: a.consoleTarget(s),
-			HasMAC:      s.MACAddress != "",
-			Status:      s.Status,
-			StatusOn:    s.Status == "On",
+			ID:               s.ID,
+			Name:             s.Name,
+			IPAddress:        s.IPAddress,
+			BMCType:          s.BMCType,
+			HasCreds:         s.RedfishUser != "" || s.IPMIUser != "",
+			ConsoleHref:      a.consoleTarget(s),
+			ConsoleAutoLogin: a.kvmTarget(s) != "",
+			HasMAC:           s.MACAddress != "",
+			Status:           s.Status,
+			StatusOn:         s.Status == "On",
 		}
 		if s.Notes != "" {
 			if rn := []rune(s.Notes); len(rn) > 50 {
@@ -405,16 +406,16 @@ func (a *App) handleAPICheckStatus(w http.ResponseWriter, r *http.Request) {
 
 // ---- console -------------------------------------------------------------
 
-// consoleTarget returns the href the primary "Console" button should use, or ""
-// when the browser-side token flow should be used instead. Only the iDRAC proxy
-// achieves a real auto-login: Supermicro's cookie auth survives a cross-origin
-// form POST, but the iDRAC SPA needs ST tokens the browser cannot read, so the
-// server-side proxy is the only path that avoids hand-entered credentials.
+// kvmTarget returns the iDRAC auto-login proxy path for s, or "" when that path
+// does not apply (feature off, wrong vendor, no credentials). Only the iDRAC
+// proxy achieves a real auto-login: Supermicro's cookie auth survives a
+// cross-origin form POST, but the iDRAC SPA needs ST tokens the browser cannot
+// read, so the server-side proxy is the only path that avoids hand-entered
+// credentials.
 //
-// Single source of truth for the three places that must agree — the button, the
-// /kvm initiator (kvm.go) and the proxy handshake — or a row renders a link that
-// its handler then refuses.
-func (a *App) consoleTarget(s *model.Server) string {
+// Single source of truth for the places that must agree — the button and the
+// /kvm initiator (kvm.go) — or a row renders a link its handler then refuses.
+func (a *App) kvmTarget(s *model.Server) string {
 	if !a.proxy.Enabled() || s.BMCType != model.BMCIDRAC {
 		return ""
 	}
@@ -422,6 +423,27 @@ func (a *App) consoleTarget(s *model.Server) string {
 		return ""
 	}
 	return "/server/" + strconv.FormatInt(s.ID, 10) + "/kvm"
+}
+
+// consoleTarget returns the href the primary "Console" button should use, or ""
+// when the browser-side token flow (openConsole) should be used instead.
+func (a *App) consoleTarget(s *model.Server) string {
+	if href := a.kvmTarget(s); href != "" {
+		return href
+	}
+	cfg := console.LoginConfigFor(s)
+	if cfg == nil || cfg.SupportsAutoLogin {
+		// No credentials at all, or a vendor whose launch page genuinely logs
+		// in (Supermicro's browser-side form; iDRAC's pre-flight). Both need
+		// the tokenised flow.
+		return ""
+	}
+	// Nothing to log into automatically, so the launch page would be nothing but
+	// the credential list — byte-for-byte the same document the 🔑 button
+	// serves. Rendering it from "Console" made the two buttons duplicates and
+	// put a credentials popup in front of every console launch. Send Console to
+	// the BMC's own UI and leave credentials to 🔑.
+	return cfg.ConsoleURL
 }
 
 // handleConsoleManual is the browser-navigable way to reach the credentials

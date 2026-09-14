@@ -68,7 +68,8 @@
                              keeps the pop-up inside the user gesture, which
                              window.open() from a fetch callback does not. */}}
                         <a href="{{.ConsoleHref}}" target="_blank" rel="noopener"
-                            class="btn btn-info btn-sm" title="Opens the BMC already logged in">Console</a>
+                            class="btn btn-info btn-sm"
+                            title="{{if .ConsoleAutoLogin}}Opens the BMC already logged in{{else}}Opens the BMC web interface (use 🔑 for credentials){{end}}">Console</a>
                         {{else}}
                         <button type="button" class="btn btn-info btn-sm"
                             onclick="openConsole({{.ID}}, '{{.Name}}')">

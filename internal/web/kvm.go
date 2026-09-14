@@ -24,7 +24,7 @@ func (a *App) handleKVM(w http.ResponseWriter, r *http.Request) {
 	// a page cached before the config changed) must degrade to the credentials
 	// page rather than 404 or bounce to the index — otherwise the primary
 	// console button looks like it silently does nothing.
-	if a.consoleTarget(s) == "" {
+	if a.kvmTarget(s) == "" {
 		http.Redirect(w, r, "/server/"+strconv.FormatInt(id, 10)+"/console/manual", http.StatusFound)
 		return
 	}

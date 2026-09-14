@@ -128,10 +128,14 @@ type serverRow struct {
 	IPAddress      string
 	BMCType        string
 	HasCreds       bool
-	// ConsoleHref is set when the primary Console button should be a plain link
-	// to the auto-login proxy; empty means fall back to the browser-side token
+	// ConsoleHref is set when the primary Console button should be a plain link:
+	// either the iDRAC auto-login proxy, or — for a vendor with no auto-login at
+	// all — the BMC's own UI. Empty means fall back to the browser-side token
 	// flow (openConsole). See App.consoleTarget.
-	ConsoleHref      string
+	ConsoleHref string
+	// ConsoleAutoLogin distinguishes those two link cases for the tooltip, so a
+	// plain link to the BMC does not claim to log the user in.
+	ConsoleAutoLogin bool
 	HasMAC           bool
 	Status           string
 	StatusOn         bool
