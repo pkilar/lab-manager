@@ -74,8 +74,12 @@ Set these in your environment or create a `.env` file:
 # Session-cookie signing key (IMPORTANT!). Generate with: openssl rand -hex 32
 LAB_MANAGER_SECRET_KEY=your-secure-random-key-here
 
-# Fernet key for encrypting stored credentials (optional; auto-generated if unset)
-LAB_MANAGER_ENCRYPTION_KEY=...
+# Fernet key for encrypting stored credentials. Leave UNSET: the app generates
+# one on first start and keeps it in instance/.encryption_key. Setting it to a
+# different valid key makes every stored credential unreadable, and the Swarm
+# stack does not pass it at all. See "Backing up the encryption key" below --
+# that file is the one thing here you cannot regenerate.
+LAB_MANAGER_ENCRYPTION_KEY=
 
 # Wake-on-LAN feature toggle (disabled by default). See "Wake-on-LAN" below.
 WOL_ENABLED=false
@@ -112,6 +116,65 @@ docker node update --label-add lab_manager_data=true <node-name>
 
 # Deploy (--with-registry-auth lets worker nodes pull from the private registry):
 docker stack deploy -c docker-stack.yml --with-registry-auth lab-manager
+```
+
+### Backing up the encryption key
+
+Stored BMC credentials are encrypted with a Fernet key. **The key is not in this
+repo, not in your `.env`, and not in any backup you have unless you made one on
+purpose.** Without it, `servers.db` is unreadable — the passwords are gone and
+every server has to be re-entered by hand.
+
+**Where it comes from.** Nobody configures it. On first start the app looks for
+`LAB_MANAGER_ENCRYPTION_KEY`, then for `instance/.encryption_key`; finding
+neither, it generates 32 random bytes, base64url-encodes them to a 44-character
+file, writes it `0600`, and logs `generated new encryption key`. Every start
+after that reads the same file. So the key's real home is the data volume:
+
+| Deploy | Location |
+|---|---|
+| docker-compose | `./instance/.encryption_key` (bind mount) |
+| Swarm | the `lab_manager_instance` volume, on the node labelled `lab_manager_data=true` |
+
+**Do not set `LAB_MANAGER_ENCRYPTION_KEY` in the Swarm stack to "configure" it.**
+The variable is not passed in `docker-stack.yml`, deliberately. It can only
+duplicate the file or contradict it, and both fail quietly: a malformed value is
+rejected and silently falls back to the file (one `ERROR` line per start, easy to
+miss for months), while a well-formed *different* value is accepted and makes
+every stored credential decrypt to garbage.
+
+**Backing it up.** Copy the file somewhere durable and secret — a password
+manager, or `ansible-vault` alongside the other cluster secrets:
+
+```bash
+# Swarm: from the node holding the volume
+CID=$(docker ps --filter name=lab-manager --format '{{.ID}}' | head -1)
+docker exec "$CID" cat /app/instance/.encryption_key > lab-manager.key
+chmod 600 lab-manager.key
+
+# docker-compose: it is just a file
+cp instance/.encryption_key lab-manager.key
+```
+
+Record its fingerprint so you can tell later whether a backup still matches the
+running key, without either of them being printed:
+
+```bash
+docker exec "$CID" sha256sum /app/instance/.encryption_key | cut -c1-16
+sha256sum lab-manager.key | cut -c1-16      # must match
+```
+
+Back up `servers.db` at the same time and keep them together — each is useless
+without the other, and a key restored against a *different* database decrypts to
+nothing.
+
+**Restoring.** Write the file back into the volume and restart; do not set the
+env var. The app uses an existing file as-is and only generates a key when none
+is found, so restoring before first start is enough:
+
+```bash
+docker run --rm -i -v lab-manager_lab_manager_instance:/v alpine \
+  sh -c 'cat > /v/.encryption_key && chmod 600 /v/.encryption_key' < lab-manager.key
 ```
 
 ### Wake-on-LAN (opt-in)

@@ -31,10 +31,18 @@ services:
       # shell/.env; if empty the app generates a random key per start (sessions
       # won't survive a restart). Recommended to set one.
       - LAB_MANAGER_SECRET_KEY=${LAB_MANAGER_SECRET_KEY:-}
-      # Fernet key for stored credentials. If empty, one is generated and saved to
-      # the data volume (instance/.encryption_key). Changing it makes existing
-      # encrypted credentials unreadable.
-      - LAB_MANAGER_ENCRYPTION_KEY=${LAB_MANAGER_ENCRYPTION_KEY:-}
+      # LAB_MANAGER_ENCRYPTION_KEY is deliberately NOT passed here. Under this
+      # deploy the Fernet key lives on the lab_manager_instance volume
+      # (instance/.encryption_key), generated on first start and persisted; the
+      # env var could only ever duplicate it or contradict it. Both failure
+      # modes are bad and neither is loud:
+      #   - a malformed value is rejected and silently falls back to the file,
+      #     so the variable looks set while doing nothing (this happened: a
+      #     6-character placeholder sat here logging one ERROR line per start);
+      #   - a well-formed but DIFFERENT value is accepted, and every stored
+      #     credential immediately decrypts to garbage.
+      # Back the key up off the volume instead - see README "Backing up the
+      # encryption key". Restore by writing the file, not by setting this.
       # Wake-on-LAN is OFF by default. It does NOT work under this overlay-networked
       # deploy (magic packets need host networking); leave it false here.
       - WOL_ENABLED=${WOL_ENABLED:-false}

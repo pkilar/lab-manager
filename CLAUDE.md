@@ -46,10 +46,15 @@ The app reads the variable names shown below, which match the long-standing name
 # start.sh generates one on first run and persists it to .env.
 LAB_MANAGER_SECRET_KEY="$(openssl rand -hex 32)"
 
-# Optional: if unset, a Fernet key is generated and saved to instance/.encryption_key (chmod 600).
-# Changing it makes existing encrypted credentials unreadable. Any urlsafe-base64
-# encoding of 32 random bytes is a valid Fernet key (e.g. `openssl rand 32 | basenc --base64url`).
-LAB_MANAGER_ENCRYPTION_KEY="..."
+# Leave UNSET. A Fernet key is generated on first start and saved to
+# instance/.encryption_key (chmod 600); that file is the key's real home.
+# docker-stack.yml deliberately does NOT pass this variable: a malformed value is
+# rejected and silently falls back to the file (one ERROR line per start), and a
+# well-formed but different value makes every stored credential unreadable.
+# See README "Backing up the encryption key". (A valid key is any urlsafe-base64
+# encoding of 32 random bytes, i.e. 44 chars -- relevant when RESTORING a backup,
+# which is done by writing the file, not by setting this.)
+LAB_MANAGER_ENCRYPTION_KEY=
 
 # Wake-on-LAN feature flag — OFF by default (accepts true/1/yes/on). Requires host
 # networking to actually wake hosts; see "Wake-on-LAN" below and the README.

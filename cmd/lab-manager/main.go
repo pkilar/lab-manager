@@ -41,7 +41,8 @@ func run() error {
 	wolEnabled := envBool("WOL_ENABLED", false)
 	bmcProxyDomain := os.Getenv("LAB_MANAGER_BMC_PROXY_DOMAIN")
 	if err := checkStrictConfig(envBool("LAB_MANAGER_STRICT_CONFIG", false),
-		os.Getenv("LAB_MANAGER_SECRET_KEY"), bmcProxyDomain); err != nil {
+		os.Getenv("LAB_MANAGER_SECRET_KEY"), bmcProxyDomain,
+		os.Getenv("LAB_MANAGER_ENCRYPTION_KEY")); err != nil {
 		return err
 	}
 	if bmcProxyDomain == "" {
@@ -124,39 +125,70 @@ func run() error {
 	}
 }
 
+// minSecretKeyLen is the shortest LAB_MANAGER_SECRET_KEY a strict deploy will
+// accept. The documented recipe is `openssl rand -hex 32` (64 chars); 32 leaves
+// room for other encodings of 128+ bits while still rejecting a placeholder.
+const minSecretKeyLen = 32
+
 // checkStrictConfig refuses to start when a deployment that declares itself
-// production is missing configuration that would otherwise degrade silently.
+// production has configuration that would otherwise degrade silently.
 //
 // This exists because `docker stack deploy` does NOT read .env: it interpolates
 // ${VAR} from the deploying shell, and an unset variable collapses to "". A CLI
 // redeploy that forgets to export them therefore starts a perfectly healthy
 // container which has quietly lost the BMC proxy domain (KVM auto-login
 // disappears, Console silently reverts to copy/paste) and the session key (a new
-// random one per boot, so every session dies on restart). Both previously
-// announced themselves only as log lines that are easy to miss.
+// random one per boot, so every session dies on restart).
+//
+// It also rejects values that are present but unusable, which is the failure
+// mode that actually survived longest in production: a 6-character placeholder
+// sat in both key variables for three months. Empty was caught; wrong was not.
 //
 // The flag is deliberately set as a LITERAL in docker-stack.yml rather than as
 // ${LAB_MANAGER_STRICT_CONFIG}, so it cannot be erased by the very mistake it
 // exists to catch. docker-compose.yml leaves it unset, so development and the
 // host-networked deploy (where the proxy genuinely cannot work) are unaffected.
-func checkStrictConfig(strict bool, secretKey, bmcProxyDomain string) error {
+func checkStrictConfig(strict bool, secretKey, bmcProxyDomain, encryptionKey string) error {
 	if !strict {
 		return nil
 	}
-	var missing []string
-	if secretKey == "" {
-		missing = append(missing, "LAB_MANAGER_SECRET_KEY (sessions would not survive a restart)")
+	var problems []string
+	switch {
+	case secretKey == "":
+		problems = append(problems,
+			"LAB_MANAGER_SECRET_KEY is empty (sessions would not survive a restart)")
+	case len(secretKey) < minSecretKeyLen:
+		// It signs session cookies and console tokens, so a short key is not a
+		// style question: it is brute-forceable offline from one cookie.
+		problems = append(problems, fmt.Sprintf(
+			"LAB_MANAGER_SECRET_KEY is only %d characters, need at least %d "+
+				"(generate with `openssl rand -hex 32`) - it signs session cookies "+
+				"and console tokens, so a short one can be brute-forced offline",
+			len(secretKey), minSecretKeyLen))
 	}
 	if bmcProxyDomain == "" {
-		missing = append(missing, "LAB_MANAGER_BMC_PROXY_DOMAIN (iDRAC KVM auto-login would be disabled)")
+		problems = append(problems,
+			"LAB_MANAGER_BMC_PROXY_DOMAIN is empty (iDRAC KVM auto-login would be disabled)")
 	}
-	if len(missing) == 0 {
+	// An EMPTY encryption key is correct and expected: the key belongs on the
+	// data volume at instance/.encryption_key. A malformed one is the trap -
+	// LoadEncryptionKey rejects it and falls back to the file, so the variable
+	// looks configured while doing nothing but logging one ERROR per start.
+	if encryptionKey != "" {
+		if _, err := secret.NewFernet([]byte(encryptionKey)); err != nil {
+			problems = append(problems, fmt.Sprintf(
+				"LAB_MANAGER_ENCRYPTION_KEY is set but is not a valid Fernet key (%v); "+
+					"it would be ignored in favour of instance/.encryption_key - leave it unset",
+				err))
+		}
+	}
+	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("LAB_MANAGER_STRICT_CONFIG is on but required settings are empty:\n  - %s\n"+
-		"`docker stack deploy` does not read .env — export these in the deploying shell "+
+	return fmt.Errorf("LAB_MANAGER_STRICT_CONFIG is on but the configuration is not usable:\n  - %s\n"+
+		"`docker stack deploy` does not read .env - export these in the deploying shell "+
 		"or set them in the Portainer stack environment, then redeploy",
-		strings.Join(missing, "\n  - "))
+		strings.Join(problems, "\n  - "))
 }
 
 // loadSecretKey reads LAB_MANAGER_SECRET_KEY, or generates an ephemeral key (with a
