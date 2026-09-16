@@ -3,12 +3,38 @@ package bmcproxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pkilar/lab-manager/internal/model"
 )
+
+// assertConsoleLaunch checks that loc is the HTML5 virtual-console page carrying
+// the two iDRAC session tokens in the shapes the viewer expects (ST2 as ST2=,
+// ST1 as TokenName/TokenKey) and pointing its KVM WebSocket at the proxy host on
+// 5900. Structural, so it does not depend on query-parameter ordering.
+func assertConsoleLaunch(t *testing.T, loc, wantST1, wantST2, wantHost string) {
+	t.Helper()
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("Location %q: %v", loc, err)
+	}
+	if u.Path != "/virtualconsolehtml5.html" {
+		t.Fatalf("Location path = %q, want the console page", u.Path)
+	}
+	q := u.Query()
+	checks := map[string]string{
+		"ST2": wantST2, "TokenName": "ST1", "TokenKey": wantST1,
+		"ipAddr": wantHost, "kvmPort": "5900",
+	}
+	for k, want := range checks {
+		if got := q.Get(k); got != want {
+			t.Errorf("console URL %s = %q, want %q", k, got, want)
+		}
+	}
+}
 
 // proxyFront fronts m.Handler, letting the test set the proxy Host header.
 func proxyFront(t *testing.T, m *Manager) *httptest.Server {
@@ -45,9 +71,9 @@ func TestHandshakeLogsInAndSetsSession(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status=%d, want 302", resp.StatusCode)
 	}
-	if loc := resp.Header.Get("Location"); loc != "/index.html?ST1=aaa,ST2=bbb" {
-		t.Fatalf("Location = %q", loc)
-	}
+	// The proxy lands the browser on the virtual-console page (built from the
+	// login's ST1/ST2), not the System Summary dashboard the forwardUrl names.
+	assertConsoleLaunch(t, resp.Header.Get("Location"), "aaa", "bbb", "idrac-1.pi.home.kilar.net")
 	var sid string
 	for _, c := range resp.Cookies() {
 		if c.Name == proxyCookieName {
@@ -80,6 +106,34 @@ func TestSafeForwardPathBlocksOpenRedirect(t *testing.T) {
 	for _, c := range cases {
 		if got := safeForwardPath(c.in); got != c.want {
 			t.Errorf("safeForwardPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestConsoleLaunchPathBuildsViewerURL(t *testing.T) {
+	// Normal case: comma-separated tokens from the login forwardUrl.
+	got := consoleLaunchPath("index.html?ST1=aaa,ST2=bbb", "idrac-1.pi.home.kilar.net")
+	assertConsoleLaunch(t, got, "aaa", "bbb", "idrac-1.pi.home.kilar.net")
+
+	// A host that carries a port (dev) must have it stripped: the viewer appends
+	// kvmPort itself, so "host:8443" + 5900 would be nonsense.
+	got = consoleLaunchPath("index.html?ST1=aaa,ST2=bbb", "idrac-1.pi.home.kilar.net:8443")
+	assertConsoleLaunch(t, got, "aaa", "bbb", "idrac-1.pi.home.kilar.net")
+}
+
+// Without both tokens the console page cannot authenticate, so the caller must
+// fall back to the dashboard rather than build a viewer URL that would fail.
+func TestConsoleLaunchPathFallsBackWithoutBothTokens(t *testing.T) {
+	cases := []string{
+		"index.html",              // iDRAC gave no tokens at all
+		"index.html?ST1=aaa",      // missing ST2
+		"index.html?ST2=bbb",      // missing ST1
+		"",                        // empty
+		"index.html?ST1=,ST2=bbb", // ST1 present but empty
+	}
+	for _, in := range cases {
+		if got := consoleLaunchPath(in, "idrac-1.pi.home.kilar.net"); got != "" {
+			t.Errorf("consoleLaunchPath(%q) = %q, want \"\" (fall back to dashboard)", in, got)
 		}
 	}
 }

@@ -350,7 +350,59 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 		Secure:   proxyScheme(r) == "https",
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, safeForwardPath(forwardURL), http.StatusFound)
+	// Land the browser on the HTML5 virtual-console page rather than the System
+	// Summary dashboard the iDRAC's forwardUrl points at, so the operator is one
+	// click ("launch") from the KVM instead of hunting for it on the dashboard.
+	// Falls back to the dashboard when the login response didn't carry both
+	// session tokens the console page needs — so it is never worse than before.
+	dest := consoleLaunchPath(forwardURL, r.Host)
+	if dest == "" {
+		dest = safeForwardPath(forwardURL)
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
+}
+
+// consoleLaunchPath turns the iDRAC login's forwardUrl into a direct link to the
+// HTML5 virtual-console page. It returns "" when the forwardUrl lacks either
+// session token, signalling the caller to fall back to the dashboard.
+//
+// The forwardUrl is "index.html?ST1=<hex>,ST2=<hex>" — the tokens are
+// COMMA-separated, not "&", so it is not a standard query string and url.Values
+// would not split it. The console page then wants them spelled differently
+// again: ST2 stays ST2=, but ST1 travels as TokenName=ST1&TokenKey=<hex>. ipAddr
+// is the proxy host the browser is already on (port stripped), so the viewer's
+// WebSocket to :5900 comes back through this proxy rather than hitting the BMC
+// directly — which the browser could not reach and TLS would reject anyway.
+func consoleLaunchPath(forwardURL, proxyHost string) string {
+	q := forwardURL
+	if i := strings.IndexByte(q, '?'); i >= 0 {
+		q = q[i+1:]
+	}
+	var st1, st2 string
+	for _, tok := range strings.FieldsFunc(q, func(r rune) bool { return r == ',' || r == '&' }) {
+		switch k, v, _ := strings.Cut(tok, "="); k {
+		case "ST1":
+			st1 = v
+		case "ST2":
+			st2 = v
+		}
+	}
+	if st1 == "" || st2 == "" {
+		return ""
+	}
+	// Encode() percent-encodes the values (hex tokens and a hostname, so nothing
+	// actually changes) and sorts the keys; order is irrelevant because the
+	// console page reads each by name from JavaScript.
+	params := url.Values{
+		"ipAddr":    {stripPort(proxyHost)},
+		"kvmPort":   {bmcConsolePort},
+		"vmPriv":    {"true"},
+		"lang":      {"en"},
+		"ST2":       {st2},
+		"TokenName": {"ST1"},
+		"TokenKey":  {st1},
+	}
+	return "/virtualconsolehtml5.html?" + params.Encode()
 }
 
 // safeForwardPath keeps only the path+query of the iDRAC-supplied forward URL,
