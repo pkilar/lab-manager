@@ -97,7 +97,9 @@ func newFakeIDRAC(t *testing.T) *fakeIDRAC {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		const doc = "<html><body>dashboard</body></html>"
+		// Shaped like the real dashboard shell: a <head> (where a frameset runs
+		// its scripts) plus body content, so the test exercises head injection.
+		const doc = "<html><head><title>iDRAC</title></head><body>dashboard</body></html>"
 		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			w.Header().Set("Content-Encoding", "gzip")
 			gz := gzip.NewWriter(w)

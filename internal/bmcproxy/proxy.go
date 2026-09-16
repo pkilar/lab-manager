@@ -242,35 +242,42 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 // happens the script drops a single fixed button, so a blocked launch costs one
 // click (still fewer than finding the console tab) instead of failing silently.
 const autoLaunchScript = `<script>(function(){
-  if (window.__labmgrKVM) return; window.__labmgrKVM = 1;
-  function quick(){
-    if (typeof window.QuickLaunch !== 'function') return null;
-    var win = null, open = window.open;
-    try {
-      window.open = function(){ win = open.apply(window, arguments); return win; };
-      window.QuickLaunch('viewer');
-    } catch (e) {} finally { window.open = open; }
-    return win; // null => QuickLaunch's window.open was blocked (no gesture)
+  var T; try { T = window.top; } catch (e) { return; }
+  if (T.__labmgrKVM) return; T.__labmgrKVM = 1;
+  // The dashboard is a frameset and QuickLaunch lives in a nested child frame,
+  // so search every frame (same-origin via the proxy) for the one that defines
+  // it rather than checking window.
+  function find(w){
+    try { if (typeof w.QuickLaunch === 'function') return w; } catch (e) { return null; }
+    var n = 0; try { n = w.frames.length; } catch (e) { return null; }
+    for (var i = 0; i < n; i++){ var f = find(w.frames[i]); if (f) return f; }
+    return null;
   }
-  function button(){
-    if (document.getElementById('labmgr-kvm')) return;
-    var b = document.createElement('button');
+  function launch(w){
+    var win = null, open = w.open;
+    try {
+      w.open = function(){ win = open.apply(w, arguments); return win; };
+      w.QuickLaunch('viewer');
+    } catch (e) {} finally { try { w.open = open; } catch (e) {} }
+    return win !== null; // false => the popup was blocked (no user gesture)
+  }
+  function button(w){
+    var d; try { d = w.document; } catch (e) { return; }
+    if (!d || d.getElementById('labmgr-kvm')) return;
+    var b = d.createElement('button');
     b.id = 'labmgr-kvm';
     b.textContent = '▶︎  Launch Virtual Console';
     b.style.cssText = 'position:fixed;z-index:2147483647;top:14px;right:14px;padding:12px 18px;'
       + 'font:600 14px system-ui,-apple-system,sans-serif;color:#fff;background:#2563eb;border:0;'
       + 'border-radius:8px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.4)';
-    b.onclick = function(){ quick(); b.remove(); }; // a real gesture: never blocked
-    (document.body || document.documentElement).appendChild(b);
+    b.onclick = function(){ launch(w); b.remove(); }; // a real gesture: never blocked
+    (d.body || d.documentElement).appendChild(b);
   }
   var tries = 0;
   (function attempt(){
-    if (typeof window.QuickLaunch !== 'function'){
-      if (++tries > 100){ button(); return; } // SPA never finished loading
-      setTimeout(attempt, 200);
-      return;
-    }
-    if (quick() === null) button(); // auto-launch blocked -> offer one click
+    var w = find(T);
+    if (!w){ if (++tries > 150) return; setTimeout(attempt, 200); return; } // wait for frames to load
+    if (!launch(w)) button(w); // found it; if the auto popup was blocked, offer one click
   })();
 })();</script>`
 
@@ -299,29 +306,31 @@ func (m *Manager) maybeInjectAutoLaunch(resp *http.Response, sid string) error {
 	if err != nil {
 		return err
 	}
-	body = injectBeforeBodyClose(body, autoLaunchScript)
+	body = injectScript(body, autoLaunchScript)
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	return nil
 }
 
-// injectBeforeBodyClose inserts script just before the last </body> (or </html>,
-// or appends) so it runs after the SPA's own scripts are in the document.
-func injectBeforeBodyClose(htmlDoc []byte, script string) []byte {
+// injectScript inserts script so it executes on load. It prefers just before
+// </head>, because the iDRAC dashboard is a frameset document and a frameset
+// only runs scripts in its head — a script placed after </frameset> (i.e. near
+// </body>/</html>) is inert. Injecting in the head runs the script before the
+// frames exist, which is fine: it polls for the frame that defines QuickLaunch.
+// Falls back to </body>, then </html>, then appends.
+func injectScript(htmlDoc []byte, script string) []byte {
 	lower := bytes.ToLower(htmlDoc)
-	at := bytes.LastIndex(lower, []byte("</body>"))
-	if at < 0 {
-		at = bytes.LastIndex(lower, []byte("</html>"))
+	for _, anchor := range []string{"</head>", "</body>", "</html>"} {
+		if at := bytes.LastIndex(lower, []byte(anchor)); at >= 0 {
+			out := make([]byte, 0, len(htmlDoc)+len(script))
+			out = append(out, htmlDoc[:at]...)
+			out = append(out, script...)
+			out = append(out, htmlDoc[at:]...)
+			return out
+		}
 	}
-	if at < 0 {
-		return append(htmlDoc, script...)
-	}
-	out := make([]byte, 0, len(htmlDoc)+len(script))
-	out = append(out, htmlDoc[:at]...)
-	out = append(out, script...)
-	out = append(out, htmlDoc[at:]...)
-	return out
+	return append(htmlDoc, script...)
 }
 
 // proxyScheme returns the scheme the browser used to reach the proxy, honoring

@@ -241,6 +241,11 @@ func TestRelayInjectsAutoLaunchIntoDashboard(t *testing.T) {
 	if !strings.Contains(body, "QuickLaunch('viewer')") {
 		t.Error("dashboard HTML should carry the auto-launch script")
 	}
+	// The script must run, so it goes in the <head> (a frameset ignores scripts
+	// placed after </frameset>): assert it lands before the body content.
+	if strings.Index(body, "__labmgrKVM") > strings.Index(body, "dashboard") {
+		t.Error("auto-launch script must be injected into <head>, before the body")
+	}
 
 	// One-shot: a second load of the same session must NOT be injected again.
 	if again := getDashboard(t, front, sid); strings.Contains(again, "QuickLaunch('viewer')") {
@@ -284,16 +289,18 @@ func getDashboard(t *testing.T, front *httptest.Server, sid string) string {
 	return readAll(t, resp)
 }
 
-func TestInjectBeforeBodyClose(t *testing.T) {
+func TestInjectScript(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"<html><body>x</body></html>", "<html><body>xSCRIPT</body></html>"},
-		{"<HTML><BODY>x</BODY></HTML>", "<HTML><BODY>xSCRIPT</BODY></HTML>"}, // case-insensitive
-		{"<html>no body</html>", "<html>no bodySCRIPT</html>"},               // falls to </html>
-		{"raw fragment", "raw fragmentSCRIPT"},                               // neither: append
+		// Head-first: a frameset runs scripts only in the head.
+		{"<html><head></head><frameset></frameset></html>", "<html><head>SCRIPT</head><frameset></frameset></html>"},
+		{"<html><HEAD></HEAD><body>x</body></html>", "<html><HEAD>SCRIPT</HEAD><body>x</body></html>"}, // case-insensitive
+		{"<html><body>x</body></html>", "<html><body>xSCRIPT</body></html>"},                           // no head: before </body>
+		{"<html>no body</html>", "<html>no bodySCRIPT</html>"},                                         // only </html>
+		{"raw fragment", "raw fragmentSCRIPT"},                                                         // neither: append
 	}
 	for _, c := range cases {
-		if got := string(injectBeforeBodyClose([]byte(c.in), "SCRIPT")); got != c.want {
-			t.Errorf("injectBeforeBodyClose(%q) = %q, want %q", c.in, got, c.want)
+		if got := string(injectScript([]byte(c.in), "SCRIPT")); got != c.want {
+			t.Errorf("injectScript(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
