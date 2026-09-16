@@ -232,34 +232,26 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 }
 
 // autoLaunchScript is injected once into the iDRAC dashboard after login so the
-// operator lands on a KVM that opens itself instead of a page they must hunt a
-// launch button on. It cannot be done by URL: the HTML5 viewer is a popup child
-// of this SPA (it reads window.opener), so only the SPA's own QuickLaunch can
-// open it correctly — this waits for that function and calls it.
+// operator is one click from the KVM instead of hunting for the console tab. It
+// cannot be done by URL: the HTML5 viewer is a popup child of this SPA (it reads
+// window.opener), so only the SPA's own QuickLaunch can open it correctly.
 //
-// The one unavoidable seam is the pop-up blocker: QuickLaunch opens a window,
-// and a script-driven open with no user gesture is often blocked. When that
-// happens the script drops a single fixed button, so a blocked launch costs one
-// click (still fewer than finding the console tab) instead of failing silently.
+// It deliberately does NOT auto-invoke QuickLaunch. A script-driven window.open
+// with no user gesture is blocked by the browser, and QuickLaunch called while
+// blocked fires a malformed inter-frame message the dashboard reports as
+// "Unknown viewer request: 0". So instead the script drops a single fixed button
+// and calls QuickLaunch only from the click — a real gesture, never blocked and
+// never triggering that alert. The dashboard is a frameset and QuickLaunch lives
+// in a nested child frame, so the script walks every same-origin frame to find
+// the one that defines it.
 const autoLaunchScript = `<script>(function(){
   var T; try { T = window.top; } catch (e) { return; }
   if (T.__labmgrKVM) return; T.__labmgrKVM = 1;
-  // The dashboard is a frameset and QuickLaunch lives in a nested child frame,
-  // so search every frame (same-origin via the proxy) for the one that defines
-  // it rather than checking window.
   function find(w){
     try { if (typeof w.QuickLaunch === 'function') return w; } catch (e) { return null; }
     var n = 0; try { n = w.frames.length; } catch (e) { return null; }
     for (var i = 0; i < n; i++){ var f = find(w.frames[i]); if (f) return f; }
     return null;
-  }
-  function launch(w){
-    var win = null, open = w.open;
-    try {
-      w.open = function(){ win = open.apply(w, arguments); return win; };
-      w.QuickLaunch('viewer');
-    } catch (e) {} finally { try { w.open = open; } catch (e) {} }
-    return win !== null; // false => the popup was blocked (no user gesture)
   }
   function button(w){
     var d; try { d = w.document; } catch (e) { return; }
@@ -270,14 +262,14 @@ const autoLaunchScript = `<script>(function(){
     b.style.cssText = 'position:fixed;z-index:2147483647;top:14px;right:14px;padding:12px 18px;'
       + 'font:600 14px system-ui,-apple-system,sans-serif;color:#fff;background:#2563eb;border:0;'
       + 'border-radius:8px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.4)';
-    b.onclick = function(){ launch(w); b.remove(); }; // a real gesture: never blocked
+    b.onclick = function(){ try { w.QuickLaunch('viewer'); } catch (e) {} b.remove(); };
     (d.body || d.documentElement).appendChild(b);
   }
   var tries = 0;
   (function attempt(){
     var w = find(T);
     if (!w){ if (++tries > 150) return; setTimeout(attempt, 200); return; } // wait for frames to load
-    if (!launch(w)) button(w); // found it; if the auto popup was blocked, offer one click
+    button(w);
   })();
 })();</script>`
 
