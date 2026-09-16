@@ -20,6 +20,9 @@ type proxySession struct {
 	ip          string
 	idracCookie string // "-http-session-=..." Cookie header value
 	expiry      time.Time
+	// autoLaunch is a one-shot flag: set at handshake, consumed by the first
+	// dashboard HTML load, which then gets the auto-launch script injected.
+	autoLaunch bool
 }
 
 type sessionStore struct {
@@ -68,6 +71,30 @@ func (s *sessionStore) get(id string) (proxySession, bool) {
 		return proxySession{}, false
 	}
 	return *sess, true
+}
+
+// setAutoLaunch marks a session so the next dashboard HTML load gets the
+// auto-launch script injected. Set at handshake, before the redirect.
+func (s *sessionStore) setAutoLaunch(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		sess.autoLaunch = true
+	}
+}
+
+// takeAutoLaunch reports whether the session is flagged for auto-launch and
+// clears the flag, so exactly one document (the first dashboard load) is
+// injected. Returns false for an unknown or already-consumed session.
+func (s *sessionStore) takeAutoLaunch(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok || !sess.autoLaunch {
+		return false
+	}
+	sess.autoLaunch = false
+	return true
 }
 
 // updateCookie refreshes the injected iDRAC cookie when the controller rotates

@@ -221,3 +221,131 @@ func readAll(t *testing.T, resp *http.Response) string {
 	}
 	return sb.String()
 }
+
+// After login the proxy injects a one-shot auto-launch script into the first
+// dashboard document, so the operator's console opens itself instead of making
+// them find a launch button. The flag is set at handshake; here we set it
+// directly on the pre-created session to exercise the relay path.
+func TestRelayInjectsAutoLaunchIntoDashboard(t *testing.T) {
+	front, m, sid := relayServer(t)
+	m.sessions.setAutoLaunch(sid)
+
+	body := getDashboard(t, front, sid)
+	// The upstream gzips (the browser asked for it); the proxy must strip
+	// Accept-Encoding so the Transport hands ModifyResponse a decompressed body.
+	// If that failed, the injected script would have landed in gzip bytes and
+	// "dashboard" would be unreadable here.
+	if !strings.Contains(body, "dashboard") {
+		t.Errorf("dashboard body not delivered decompressed; got %q", body)
+	}
+	if !strings.Contains(body, "QuickLaunch('viewer')") {
+		t.Error("dashboard HTML should carry the auto-launch script")
+	}
+
+	// One-shot: a second load of the same session must NOT be injected again.
+	if again := getDashboard(t, front, sid); strings.Contains(again, "QuickLaunch('viewer')") {
+		t.Error("auto-launch must be injected only once per handshake")
+	}
+}
+
+// Non-HTML responses (assets, XHR) must never be rewritten, even while the flag
+// is pending — injecting into JSON or an image would corrupt it.
+func TestRelayDoesNotInjectIntoNonHTML(t *testing.T) {
+	front, m, sid := relayServer(t)
+	m.sessions.setAutoLaunch(sid)
+
+	// /protected returns text/plain; the flag must survive for the real dashboard.
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/protected", nil)
+	req.AddCookie(&http.Cookie{Name: proxyCookieName, Value: sid})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readAll(t, resp)
+	_ = resp.Body.Close()
+	if strings.Contains(body, "QuickLaunch") {
+		t.Fatalf("non-HTML response was injected: %q", body)
+	}
+	if !m.sessions.takeAutoLaunch(sid) {
+		t.Error("a non-HTML response must not consume the one-shot flag")
+	}
+}
+
+func getDashboard(t *testing.T, front *httptest.Server, sid string) string {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: proxyCookieName, Value: sid})
+	req.Header.Set("Accept-Encoding", "gzip") // the browser asks for gzip; proxy must strip it
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return readAll(t, resp)
+}
+
+func TestInjectBeforeBodyClose(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"<html><body>x</body></html>", "<html><body>xSCRIPT</body></html>"},
+		{"<HTML><BODY>x</BODY></HTML>", "<HTML><BODY>xSCRIPT</BODY></HTML>"}, // case-insensitive
+		{"<html>no body</html>", "<html>no bodySCRIPT</html>"},               // falls to </html>
+		{"raw fragment", "raw fragmentSCRIPT"},                               // neither: append
+	}
+	for _, c := range cases {
+		if got := string(injectBeforeBodyClose([]byte(c.in), "SCRIPT")); got != c.want {
+			t.Errorf("injectBeforeBodyClose(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// maybeInjectAutoLaunch, unit-tested directly so the guards don't depend on
+// Transport compression quirks: identity HTML with the flag set is injected; a
+// compressed body is left alone AND keeps the flag for a later identity load.
+func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
+	newResp := func(ct, ce, body string) *http.Response {
+		h := http.Header{}
+		if ct != "" {
+			h.Set("Content-Type", ct)
+		}
+		if ce != "" {
+			h.Set("Content-Encoding", ce)
+		}
+		return &http.Response{Header: h, Body: io.NopCloser(strings.NewReader(body))}
+	}
+	bodyOf := func(r *http.Response) string {
+		b, _ := io.ReadAll(r.Body)
+		return string(b)
+	}
+
+	t.Run("identity html is injected", func(t *testing.T) {
+		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+		sid, _, _ := m.sessions.create(1, "x", "c")
+		m.sessions.setAutoLaunch(sid)
+		resp := newResp("text/html", "", "<html><body>x</body></html>")
+		if err := m.maybeInjectAutoLaunch(resp, sid); err != nil {
+			t.Fatal(err)
+		}
+		if got := bodyOf(resp); !strings.Contains(got, "QuickLaunch('viewer')") {
+			t.Errorf("identity HTML not injected: %q", got)
+		}
+		if resp.Header.Get("Content-Length") == "" {
+			t.Error("Content-Length must be updated after injection")
+		}
+	})
+
+	t.Run("gzip body is not injected and keeps the flag", func(t *testing.T) {
+		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+		sid, _, _ := m.sessions.create(1, "x", "c")
+		m.sessions.setAutoLaunch(sid)
+		resp := newResp("text/html", "gzip", "\x1f\x8b compressed bytes")
+		if err := m.maybeInjectAutoLaunch(resp, sid); err != nil {
+			t.Fatal(err)
+		}
+		if got := bodyOf(resp); strings.Contains(got, "QuickLaunch") {
+			t.Errorf("gzip body must not be injected: %q", got)
+		}
+		if !m.sessions.takeAutoLaunch(sid) {
+			t.Error("a skipped (compressed) response must preserve the one-shot flag")
+		}
+	})
+}

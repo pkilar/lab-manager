@@ -67,6 +67,11 @@ func TestHandshakeLogsInAndSetsSession(t *testing.T) {
 	if !ok || sess.serverID != 1 || sess.idracCookie != "-http-session-="+idracSessionValue {
 		t.Fatalf("session not stored correctly: %+v ok=%v", sess, ok)
 	}
+	// The handshake flags the session so the dashboard it redirects to gets the
+	// console auto-launch script injected.
+	if !m.sessions.takeAutoLaunch(sid) {
+		t.Error("handshake should flag the session for console auto-launch")
+	}
 }
 
 func TestSafeForwardPathBlocksOpenRedirect(t *testing.T) {

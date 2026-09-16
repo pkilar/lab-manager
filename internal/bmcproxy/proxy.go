@@ -1,9 +1,11 @@
 package bmcproxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -210,11 +212,16 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 			// X-Forwarded-*/Forwarded headers, but Traefik's X-Real-Ip
 			// is not one of them, so drop it explicitly.
 			pr.Out.Header.Del("X-Real-Ip")
+			// Ask the BMC for identity encoding so ModifyResponse can inject the
+			// auto-launch script into the dashboard HTML without gzip surgery.
+			// This is a low-traffic admin proxy on a LAN; the lost compression
+			// is negligible, and the KVM stream is a WebSocket, unaffected.
+			pr.Out.Header.Del("Accept-Encoding")
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rewriteLocation(resp, ip, r.Host, proxyScheme(r))
 			m.rewriteSetCookies(resp, sid)
-			return nil
+			return m.maybeInjectAutoLaunch(resp, sid)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			slog.Error("bmcproxy upstream", "ip", ip, "err", err)
@@ -222,6 +229,99 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 		},
 	}
 	rp.ServeHTTP(w, r)
+}
+
+// autoLaunchScript is injected once into the iDRAC dashboard after login so the
+// operator lands on a KVM that opens itself instead of a page they must hunt a
+// launch button on. It cannot be done by URL: the HTML5 viewer is a popup child
+// of this SPA (it reads window.opener), so only the SPA's own QuickLaunch can
+// open it correctly — this waits for that function and calls it.
+//
+// The one unavoidable seam is the pop-up blocker: QuickLaunch opens a window,
+// and a script-driven open with no user gesture is often blocked. When that
+// happens the script drops a single fixed button, so a blocked launch costs one
+// click (still fewer than finding the console tab) instead of failing silently.
+const autoLaunchScript = `<script>(function(){
+  if (window.__labmgrKVM) return; window.__labmgrKVM = 1;
+  function quick(){
+    if (typeof window.QuickLaunch !== 'function') return null;
+    var win = null, open = window.open;
+    try {
+      window.open = function(){ win = open.apply(window, arguments); return win; };
+      window.QuickLaunch('viewer');
+    } catch (e) {} finally { window.open = open; }
+    return win; // null => QuickLaunch's window.open was blocked (no gesture)
+  }
+  function button(){
+    if (document.getElementById('labmgr-kvm')) return;
+    var b = document.createElement('button');
+    b.id = 'labmgr-kvm';
+    b.textContent = '▶︎  Launch Virtual Console';
+    b.style.cssText = 'position:fixed;z-index:2147483647;top:14px;right:14px;padding:12px 18px;'
+      + 'font:600 14px system-ui,-apple-system,sans-serif;color:#fff;background:#2563eb;border:0;'
+      + 'border-radius:8px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.4)';
+    b.onclick = function(){ quick(); b.remove(); }; // a real gesture: never blocked
+    (document.body || document.documentElement).appendChild(b);
+  }
+  var tries = 0;
+  (function attempt(){
+    if (typeof window.QuickLaunch !== 'function'){
+      if (++tries > 100){ button(); return; } // SPA never finished loading
+      setTimeout(attempt, 200);
+      return;
+    }
+    if (quick() === null) button(); // auto-launch blocked -> offer one click
+  })();
+})();</script>`
+
+// maybeInjectAutoLaunch injects autoLaunchScript into the first dashboard
+// document of a freshly authenticated session, then clears the one-shot flag so
+// later navigation is untouched. Only text/html documents qualify; assets and
+// XHR/JSON responses pass through. Accept-Encoding was stripped upstream, so the
+// body is identity and needs no gzip handling.
+func (m *Manager) maybeInjectAutoLaunch(resp *http.Response, sid string) error {
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+		return nil
+	}
+	// Refuse to touch a compressed body: injecting into gzip bytes corrupts the
+	// document. Accept-Encoding was stripped upstream so the Transport hands us
+	// identity here, but if that ever fails we skip (leaving the flag for a later
+	// identity load) rather than mangle the page. Checked before consuming the
+	// one-shot flag so a stray compressed response doesn't waste it.
+	if resp.Header.Get("Content-Encoding") != "" {
+		return nil
+	}
+	if !m.sessions.takeAutoLaunch(sid) {
+		return nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	body = injectBeforeBodyClose(body, autoLaunchScript)
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return nil
+}
+
+// injectBeforeBodyClose inserts script just before the last </body> (or </html>,
+// or appends) so it runs after the SPA's own scripts are in the document.
+func injectBeforeBodyClose(htmlDoc []byte, script string) []byte {
+	lower := bytes.ToLower(htmlDoc)
+	at := bytes.LastIndex(lower, []byte("</body>"))
+	if at < 0 {
+		at = bytes.LastIndex(lower, []byte("</html>"))
+	}
+	if at < 0 {
+		return append(htmlDoc, script...)
+	}
+	out := make([]byte, 0, len(htmlDoc)+len(script))
+	out = append(out, htmlDoc[:at]...)
+	out = append(out, script...)
+	out = append(out, htmlDoc[at:]...)
+	return out
 }
 
 // proxyScheme returns the scheme the browser used to reach the proxy, honoring
@@ -339,6 +439,9 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 	for _, d := range displaced {
 		go m.logoutIDRAC(d.ip, d.idracCookie)
 	}
+	// Flag this session so the dashboard we're about to land on gets the
+	// auto-launch script injected — it clicks the console open for the operator.
+	m.sessions.setAutoLaunch(sid)
 	http.SetCookie(w, &http.Cookie{
 		Name:     proxyCookieName,
 		Value:    sid,

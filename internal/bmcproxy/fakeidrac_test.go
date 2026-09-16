@@ -1,6 +1,7 @@
 package bmcproxy
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -84,6 +85,27 @@ func newFakeIDRAC(t *testing.T) *fakeIDRAC {
 			return
 		}
 		io.WriteString(w, "secret-content")
+	})
+
+	// /dashboard stands in for the iDRAC SPA shell: a text/html document, so it
+	// is the kind of response the auto-launch script is injected into. It gzips
+	// when asked, exactly like the real iDRAC — so the test exercises the path
+	// where the proxy must hand ModifyResponse a decompressed body to inject.
+	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		if !requireSession(r) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		const doc = "<html><body>dashboard</body></html>"
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			_, _ = io.WriteString(gz, doc)
+			_ = gz.Close()
+			return
+		}
+		io.WriteString(w, doc)
 	})
 
 	// /echo reports the raw query string as received plus the client-controlled
