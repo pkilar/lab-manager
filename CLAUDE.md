@@ -11,7 +11,7 @@ The routes, on-disk SQLite schema, Fernet-encrypted credentials, and scrypt pass
 ## Development Commands
 
 ```bash
-# Build / run / test (Go 1.26+)
+# Build / run / test (Go 1.27.2+)
 go build -o lab-manager ./cmd/lab-manager   # Build the binary
 go run ./cmd/lab-manager                     # Run locally (listens on :5000)
 go test ./...                                # Run the test suite
@@ -143,7 +143,7 @@ Go `html/template`, embedded from `internal/web/templates/` via `//go:embed`. Th
 ## Deployment Options
 
 ### Docker Compose
-- Built from `Dockerfile` — a multi-stage build: `golang:1.26-alpine` compiles a static (`CGO_ENABLED=0`) binary, copied into a minimal `alpine` runtime that installs only `ipmitool` and `ca-certificates`. Templates and the timezone DB are embedded, so nothing else is copied.
+- Built from `Dockerfile` — a multi-stage build: `golang:1.27-alpine` compiles a static (`CGO_ENABLED=0`) binary, copied into a minimal `alpine` runtime that installs only `ipmitool` and `ca-certificates`. Templates and the timezone DB are embedded, so nothing else is copied.
 - Uses host networking for Wake-on-LAN broadcast packets.
 - Bind-mounts `./instance` for the SQLite DB and `.encryption_key`.
 

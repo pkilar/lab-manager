@@ -322,7 +322,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed development documentation.
 
 ### Local Development (Without Docker)
 
-Requires Go 1.26+.
+Requires Go 1.27.2+.
 
 1. Install the `ipmitool` system dependency (needed for IPMI power control):
 ```bash

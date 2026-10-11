@@ -4,7 +4,7 @@
 # Pinned to the BUILD platform so the compiler always runs natively and
 # cross-compiles to each TARGET arch — fast multi-arch builds with no emulation
 # of the toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 
 ARG TARGETOS
 ARG TARGETARCH

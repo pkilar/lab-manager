@@ -50,15 +50,15 @@ func (a *App) signSession(payload []byte) string {
 }
 
 func (a *App) parseSession(cookie string) *sessionData {
-	dot := strings.LastIndexByte(cookie, '.')
-	if dot < 0 {
+	encPayload, encSig, ok := strings.CutLast(cookie, ".")
+	if !ok {
 		return &sessionData{}
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(cookie[:dot])
+	payload, err := base64.RawURLEncoding.DecodeString(encPayload)
 	if err != nil {
 		return &sessionData{}
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(cookie[dot+1:])
+	sig, err := base64.RawURLEncoding.DecodeString(encSig)
 	if err != nil {
 		return &sessionData{}
 	}
