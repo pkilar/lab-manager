@@ -59,6 +59,10 @@ func (s *sessionStore) create(serverID int64, ip, idracCookie string) (id string
 // get returns a COPY of the session. Returning the *proxySession would let the
 // caller read fields after the mutex is released, racing updateCookie, which
 // rewrites idracCookie under the lock when the iDRAC rotates it mid-session.
+//
+// An expired entry reports not-found but is left in the map: only gc() hands
+// evicted sessions back for an iDRAC logout, so deleting here would strand the
+// session in the BMC's small session table until the BMC times it out.
 func (s *sessionStore) get(id string) (proxySession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -67,7 +71,6 @@ func (s *sessionStore) get(id string) (proxySession, bool) {
 		return proxySession{}, false
 	}
 	if s.now().After(sess.expiry) {
-		delete(s.sessions, id)
 		return proxySession{}, false
 	}
 	return *sess, true

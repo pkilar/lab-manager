@@ -356,3 +356,35 @@ func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
 		}
 	})
 }
+
+func TestRewriteSetCookiesFailsClosedOnMalformedSession(t *testing.T) {
+	m := NewManager(nil, []byte("k"), "x.test")
+	sid, _, _ := m.sessions.create(1, "10.0.0.1", "-http-session-=OLD")
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Add("Set-Cookie", `-http-session-="abc; Path=/`) // unbalanced quote: unparseable
+	resp.Header.Add("Set-Cookie", `  -http-session-=sp"ace; Path=/`)
+	resp.Header.Add("Set-Cookie", `other="oops; Path=/`) // unparseable, not the session cookie
+	m.rewriteSetCookies(resp, sid)
+
+	got := resp.Header.Values("Set-Cookie")
+	if len(got) != 1 || got[0] != `other="oops; Path=/` {
+		t.Fatalf("want only the non-session cookie passed through, got %q", got)
+	}
+	if s, _ := m.sessions.get(sid); s.idracCookie != "-http-session-=OLD" {
+		t.Fatalf("malformed line must not alter stored cookie: %q", s.idracCookie)
+	}
+}
+
+func TestRewriteSetCookiesCapturesWellFormedSession(t *testing.T) {
+	m := NewManager(nil, []byte("k"), "x.test")
+	sid, _, _ := m.sessions.create(1, "10.0.0.1", "-http-session-=OLD")
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Add("Set-Cookie", "-http-session-=NEW; Path=/; Domain=idrac.test")
+	m.rewriteSetCookies(resp, sid)
+	if got := resp.Header.Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("session cookie leaked: %q", got)
+	}
+	if s, _ := m.sessions.get(sid); s.idracCookie != "-http-session-=NEW" {
+		t.Fatalf("session cookie not captured: %q", s.idracCookie)
+	}
+}

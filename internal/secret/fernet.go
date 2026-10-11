@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -160,8 +161,14 @@ func LoadEncryptionKey(instanceDir string) ([]byte, error) {
 	}
 
 	keyFile := filepath.Join(instanceDir, ".encryption_key")
-	if b, err := os.ReadFile(keyFile); err == nil {
-		return bytes.TrimSpace(b), nil
+	b, err := os.ReadFile(keyFile)
+	switch {
+	case err == nil:
+		return validateKeyFile(keyFile, b)
+	case !errors.Is(err, fs.ErrNotExist):
+		// Never generate over a key we merely failed to read: replacing it
+		// would make every stored credential undecryptable.
+		return nil, fmt.Errorf("read encryption key %s: %w", keyFile, err)
 	}
 
 	raw := make([]byte, 32)
@@ -172,9 +179,47 @@ func LoadEncryptionKey(instanceDir string) ([]byte, error) {
 	if err := os.MkdirAll(instanceDir, 0o755); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(keyFile, encoded, 0o600); err != nil {
+
+	// Write a private temp file, then hard-link it into place: link fails with
+	// ErrExist rather than clobbering a key another process created first.
+	tmp, err := os.CreateTemp(instanceDir, ".encryption_key.tmp-*")
+	if err != nil {
+		return nil, err
+	}
+	// The temp name is always removed: after a successful Link the key lives on
+	// under keyFile, and on any failure the temp is just garbage.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	_, werr := tmp.Write(encoded)
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return nil, werr
+	}
+	if err := os.Link(tmp.Name(), keyFile); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			existing, rerr := os.ReadFile(keyFile)
+			if rerr != nil {
+				return nil, fmt.Errorf("read encryption key %s: %w", keyFile, rerr)
+			}
+			return validateKeyFile(keyFile, existing)
+		}
 		return nil, err
 	}
 	slog.Warn("generated new encryption key", "path", keyFile)
 	return encoded, nil
+}
+
+// validateKeyFile checks the contents of an existing key file. An invalid file
+// is an error, never a cue to regenerate: the file exists, so replacing it
+// would destroy the only copy of whatever key encrypted the stored data.
+func validateKeyFile(path string, b []byte) ([]byte, error) {
+	key := bytes.TrimSpace(b)
+	if _, err := NewFernet(key); err != nil {
+		return nil, fmt.Errorf("encryption key file %s is invalid (refusing to overwrite): %w", path, err)
+	}
+	return key, nil
 }

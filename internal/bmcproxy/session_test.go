@@ -27,7 +27,7 @@ func TestSessionStoreCreateGetExpire(t *testing.T) {
 		t.Fatalf("updateCookie not applied: %q", g.idracCookie)
 	}
 
-	// Advance past TTL: get must miss and the entry must be swept.
+	// Advance past TTL: get must miss, but the entry stays for gc to log out.
 	s.now = func() time.Time { return base.Add(sessionTTL + time.Second) }
 	if _, ok := s.get(id); ok {
 		t.Fatal("expired session should not resolve")
@@ -71,5 +71,20 @@ func TestGCReturnsExpiredForLogout(t *testing.T) {
 	}
 	if got2 := s.gc(); len(got2) != 0 {
 		t.Fatal("second gc should be empty (already swept)")
+	}
+}
+
+func TestGetExpiredLeavesSessionForGC(t *testing.T) {
+	s := newSessionStore()
+	base := time.Unix(3_000_000, 0)
+	s.now = func() time.Time { return base }
+	id, _, _ := s.create(7, "10.0.0.7", "-http-session-=X")
+	s.now = func() time.Time { return base.Add(sessionTTL + time.Second) }
+	if _, ok := s.get(id); ok {
+		t.Fatal("expired session must not resolve")
+	}
+	got := s.gc()
+	if len(got) != 1 || got[0].serverID != 7 || got[0].ip != "10.0.0.7" {
+		t.Fatalf("gc must still return the session get() rejected, got %+v", got)
 	}
 }

@@ -4,6 +4,7 @@ package web
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/pkilar/lab-manager/internal/bmcproxy"
 	"github.com/pkilar/lab-manager/internal/console"
@@ -22,6 +23,8 @@ type App struct {
 	tmpl       *Templates
 	secretKey  []byte
 	wolEnabled bool
+	now        func() time.Time // injectable clock for session expiry and login throttling
+	loginLimit *loginLimiter
 }
 
 // New builds the web application: it parses the embedded templates and
@@ -40,6 +43,8 @@ func New(st *store.Store, secretKey []byte, wolEnabled bool, bmcProxyDomain stri
 		tmpl:       tmpl,
 		secretKey:  secretKey,
 		wolEnabled: wolEnabled,
+		now:        time.Now,
+		loginLimit: newLoginLimiter(),
 	}, nil
 }
 

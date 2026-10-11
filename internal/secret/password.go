@@ -26,6 +26,14 @@ const (
 	saltLength   = 16
 )
 
+// Upper bounds on cost parameters read back from a stored hash.
+const (
+	maxScryptN    = 1 << 20
+	maxScryptR    = 32
+	maxScryptP    = 16
+	maxPBKDF2Iter = 10_000_000
+)
+
 const saltAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 // GeneratePasswordHash produces a hash using the scrypt method with default
@@ -54,6 +62,11 @@ func CheckPasswordHash(stored, password string) bool {
 		return false
 	}
 
+	want, err := hex.DecodeString(wantHex)
+	if err != nil || len(want) == 0 {
+		return false
+	}
+
 	var got []byte
 	switch {
 	case strings.HasPrefix(method, "scrypt:"):
@@ -67,7 +80,12 @@ func CheckPasswordHash(stored, password string) bool {
 		if err1 != nil || err2 != nil || err3 != nil {
 			return false
 		}
-		dk, err := scrypt.Key([]byte(password), []byte(salt), n, r, p, len(wantHex)/2)
+		// Bound the stored cost parameters so a tampered row can't make
+		// verification allocate gigabytes or spin for minutes.
+		if n < 2 || n > maxScryptN || n&(n-1) != 0 || r < 1 || r > maxScryptR || p < 1 || p > maxScryptP {
+			return false
+		}
+		dk, err := scrypt.Key([]byte(password), []byte(salt), n, r, p, len(want))
 		if err != nil {
 			return false
 		}
@@ -79,10 +97,10 @@ func CheckPasswordHash(stored, password string) bool {
 			return false
 		}
 		iter, err := strconv.Atoi(parts[2])
-		if err != nil {
+		if err != nil || iter < 1 || iter > maxPBKDF2Iter {
 			return false
 		}
-		dk, err := pbkdf2.Key(sha256.New, password, []byte(salt), iter, len(wantHex)/2)
+		dk, err := pbkdf2.Key(sha256.New, password, []byte(salt), iter, len(want))
 		if err != nil {
 			return false
 		}
@@ -92,10 +110,6 @@ func CheckPasswordHash(stored, password string) bool {
 		return false
 	}
 
-	want, err := hex.DecodeString(wantHex)
-	if err != nil {
-		return false
-	}
 	return hmac.Equal(got, want)
 }
 

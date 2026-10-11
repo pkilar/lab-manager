@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/pkilar/lab-manager/internal/model"
 )
@@ -30,6 +31,8 @@ type Flash struct {
 type sessionData struct {
 	UID     int64   `json:"uid,omitempty"`
 	CSRF    string  `json:"csrf,omitempty"`
+	IAT     int64   `json:"iat,omitempty"` // unix seconds at login; bounds the session lifetime
+	PV      string  `json:"pv,omitempty"`  // password-version marker; a password change invalidates old sessions
 	Flashes []Flash `json:"flashes,omitempty"`
 	dirty   bool    // not serialized; set when the session must be re-saved
 }
@@ -42,6 +45,21 @@ const (
 )
 
 const sessionCookie = "session"
+
+// sessionMaxAge is the server-side absolute session lifetime. The cookie itself
+// stays a browser-session cookie (no MaxAge/Expires), so closing the browser
+// still logs out as before.
+const sessionMaxAge = 24 * time.Hour
+
+// passwordVersion derives a marker from the user's password hash, stored in the
+// session so a password change invalidates every other session. It is
+// domain-separated so it cannot collide with other HMAC uses of the key, and
+// reveals nothing useful about the hash.
+func (a *App) passwordVersion(passwordHash string) string {
+	mac := hmac.New(sha256.New, a.secretKey)
+	mac.Write([]byte("session-pv\x00" + passwordHash))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+}
 
 func (a *App) signSession(payload []byte) string {
 	mac := hmac.New(sha256.New, a.secretKey)
@@ -98,13 +116,17 @@ func (s *sessionData) csrfToken() string {
 	return s.CSRF
 }
 
-func (s *sessionData) setUID(uid int64) {
+func (s *sessionData) login(uid, iat int64, pv string) {
 	s.UID = uid
+	s.IAT = iat
+	s.PV = pv
 	s.dirty = true
 }
 
 func (s *sessionData) logout() {
 	s.UID = 0
+	s.IAT = 0
+	s.PV = ""
 	s.dirty = true
 }
 
@@ -238,6 +260,14 @@ func (a *App) requireLogin(enforcePasswordGate bool, h http.HandlerFunc) http.Ha
 		user, err := a.store.GetUserByID(sess.UID)
 		if err != nil {
 			sess.logout()
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		// Cookies without iat predate expiry support; treat them as expired.
+		if sess.IAT == 0 || a.now().After(time.Unix(sess.IAT, 0).Add(sessionMaxAge)) ||
+			!hmac.Equal([]byte(sess.PV), []byte(a.passwordVersion(user.PasswordHash))) {
+			sess.logout()
+			sess.flash("warning", "Your session has expired. Please log in again.")
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}

@@ -46,6 +46,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// actionPastTense maps a power action to the verb used in the success flash.
+var actionPastTense = map[string]string{"start": "started", "stop": "stopped", "restart": "restarted"}
+
 func actionToCommand(action string) (string, bool) {
 	switch action {
 	case "start":
@@ -311,12 +314,14 @@ func (a *App) handlePowerAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
 	command, ok := actionToCommand(action)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "Invalid action"})
+		// Browser form handler: flash and redirect rather than return JSON.
+		requestSession(r).flash("error", "Invalid action")
+		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 	success, message := a.power.Send(r.Context(), s, command)
 	if success {
-		requestSession(r).flash("success", fmt.Sprintf("Server %s %sed successfully!", s.Name, action))
+		requestSession(r).flash("success", fmt.Sprintf("Server %s %s successfully!", s.Name, actionPastTense[action]))
 	} else {
 		requestSession(r).flash("error", "Error: "+message)
 	}
@@ -562,10 +567,24 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		username := strings.TrimSpace(r.PostFormValue("username"))
 		password := r.PostFormValue("password")
 
+		now := a.now()
+		key := loginKey(username)
+		if ok, retry := a.loginLimit.allow(key, now); !ok {
+			secs := int((retry + time.Second - 1) / time.Second)
+			requestSession(r).flash("error", fmt.Sprintf("Too many failed login attempts. Try again in %d seconds.", secs))
+			a.renderPage(w, "login", http.StatusTooManyRequests, simplePage{a.baseData(r)})
+			return
+		}
+
+		// Always run one scrypt verification, even for unknown usernames, so
+		// response time does not reveal which usernames exist.
 		user, err := a.store.GetUserByUsername(username)
-		if err == nil && secret.CheckPasswordHash(user.PasswordHash, password) {
+		if err != nil {
+			secret.CheckPasswordHash(dummyPasswordHash(), password)
+		} else if secret.CheckPasswordHash(user.PasswordHash, password) {
+			a.loginLimit.succeed(key)
 			sess := requestSession(r)
-			sess.setUID(user.ID)
+			sess.login(user.ID, now.Unix(), a.passwordVersion(user.PasswordHash))
 			if user.PasswordChangeRequired {
 				sess.flash("warning", "Please change your default password for security.")
 				http.Redirect(w, r, "/change-password", http.StatusFound)
@@ -574,6 +593,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
+		a.loginLimit.fail(key, now)
 		requestSession(r).flash("error", "Invalid username or password")
 	}
 	a.renderPage(w, "login", http.StatusOK, simplePage{a.baseData(r)})
@@ -610,7 +630,11 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			a.serverError(w, r, err)
 			return
 		}
-		requestSession(r).flash("success", "Password changed successfully!")
+		// Keep this session valid under the new password version; every other
+		// session of the user is now invalid.
+		sess := requestSession(r)
+		sess.login(user.ID, a.now().Unix(), a.passwordVersion(hash))
+		sess.flash("success", "Password changed successfully!")
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}

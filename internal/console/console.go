@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -293,9 +294,9 @@ func idracCleanupSession(ip, token, location string) {
 
 var authResultPattern = regexp.MustCompile(`<authResult>(\d+)</authResult>`)
 
-// idracLegacyPreAuth tries the legacy /data/login endpoint (iDRAC 6/7/8). Any
-// cookies it returns are intentionally discarded — they can't be shared
-// cross-origin with the browser.
+// idracLegacyPreAuth tries the legacy /data/login endpoint (iDRAC 6/7/8). The
+// session it opens can't be shared cross-origin with the browser, so on success
+// it is logged out again rather than left to occupy a session slot.
 func idracLegacyPreAuth(ctx context.Context, ip, user, pass string, res *IDRACAuthResult) {
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -337,9 +338,41 @@ func idracLegacyPreAuth(ctx context.Context, ip, user, pass string, res *IDRACAu
 		res.Success = true
 		res.Method = "legacy"
 		res.Error = ""
+		// The successful login opened a live iDRAC web session we never use;
+		// release it so repeated launches don't fill the small session table.
+		for _, c := range resp.Cookies() {
+			if c.Name == "-http-session-" && c.Value != "" {
+				idracLegacyLogout(ctx, ip, c)
+				break
+			}
+		}
 	default:
 		res.Error = "Invalid credentials"
 	}
+}
+
+// idracLegacyLogout releases the iDRAC web session created by /data/login.
+// Best-effort: it runs on a context detached from the caller's (with its own
+// short deadline) so it completes even when the originating request is gone.
+// Same logic as bmcproxy.logoutIDRAC, duplicated because this package
+// deliberately does not depend on bmcproxy. The cookie value is never logged.
+func idracLegacyLogout(ctx context.Context, ip string, session *http.Cookie) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+ip+"/data/logout", nil)
+	if err != nil {
+		slog.Warn("iDRAC legacy logout: build request", "ip", ip, "err", err)
+		return
+	}
+	req.AddCookie(&http.Cookie{Name: session.Name, Value: session.Value})
+	resp, err := bmcHTTPClient.Do(req)
+	if err != nil {
+		slog.Warn("iDRAC legacy logout failed; session may linger until it times out", "ip", ip, "err", err)
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
 }
 
 // NOTE: there is intentionally no server-side Supermicro pre-authentication

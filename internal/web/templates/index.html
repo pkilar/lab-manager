@@ -97,21 +97,21 @@
                                 onclick="return confirm('Are you sure you want to delete this server?')">Delete</button>
                         </form>
                         <form method="POST"
-                            action="/api/server/{{.ID}}/power/start"
+                            action="/server/{{.ID}}/power/start"
                             style="display: inline;">
                             <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                             <button type="submit" class="btn btn-success btn-sm"
                                 onclick="return confirm('Start this server?')">Start</button>
                         </form>
                         <form method="POST"
-                            action="/api/server/{{.ID}}/power/stop"
+                            action="/server/{{.ID}}/power/stop"
                             style="display: inline;">
                             <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                             <button type="submit" class="btn btn-danger btn-sm"
                                 onclick="return confirm('Stop this server?')">Stop</button>
                         </form>
                         <form method="POST"
-                            action="/api/server/{{.ID}}/power/restart"
+                            action="/server/{{.ID}}/power/restart"
                             style="display: inline;">
                             <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
                             <button type="submit" class="btn btn-warning btn-sm"

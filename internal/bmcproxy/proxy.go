@@ -371,6 +371,16 @@ func (m *Manager) rewriteSetCookies(resp *http.Response, sid string) {
 	for _, line := range lines {
 		c, err := http.ParseSetCookie(line)
 		if err != nil {
+			// Fail closed for the session cookie only: an unparseable line
+			// named -http-session- would otherwise hand the real iDRAC token
+			// to the browser (and never reach the store). Other unparseable
+			// cookies keep passing through verbatim -- the iDRAC UI cookies
+			// that work today must not start vanishing.
+			name, _, _ := strings.Cut(line, "=")
+			if strings.TrimSpace(name) == idracSessionCookie {
+				slog.Warn("bmcproxy dropped unparseable iDRAC session Set-Cookie", "cookie", idracSessionCookie, "err", err)
+				continue
+			}
 			out = append(out, line)
 			continue
 		}

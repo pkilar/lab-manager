@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -40,11 +41,13 @@ var bmcHTTPClient = &http.Client{
 type Controller struct {
 	store      *store.Store
 	wolEnabled bool
+	// sendWoL transmits one magic packet; a field so tests can avoid real UDP.
+	sendWoL func(packet []byte, ip string, port int) error
 }
 
 // NewController builds a power controller. wolEnabled gates Wake-on-LAN.
 func NewController(st *store.Store, wolEnabled bool) *Controller {
-	return &Controller{store: st, wolEnabled: wolEnabled}
+	return &Controller{store: st, wolEnabled: wolEnabled, sendWoL: sendMagicPacket}
 }
 
 // Send selects exactly one protocol by credential availability — not a fallback
@@ -127,14 +130,26 @@ func (c *Controller) redfishCommand(ctx context.Context, s *model.Server, comman
 	}
 }
 
+// ipmiArgs builds the ipmitool argv. The password is deliberately absent: -E
+// makes ipmitool read it from the IPMI_PASSWORD environment variable (see
+// ipmiEnv), keeping it out of `ps` and /proc/<pid>/cmdline.
+func ipmiArgs(s *model.Server, cmd ...string) []string {
+	return append([]string{"-I", "lan", "-H", s.IPAddress, "-U", s.IPMIUser, "-E"}, cmd...)
+}
+
+// ipmiEnv is the child environment carrying the IPMI password for -E.
+func ipmiEnv(s *model.Server) []string {
+	return append(os.Environ(), "IPMI_PASSWORD="+s.IPMIPassword)
+}
+
 // ipmiCommand runs `ipmitool ... <command>` over LAN.
 func (c *Controller) ipmiCommand(ctx context.Context, s *model.Server, command string) (bool, string) {
 	cmdCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
 	defer cancel()
 
-	args := append([]string{"-I", "lan", "-H", s.IPAddress, "-U", s.IPMIUser, "-P", s.IPMIPassword}, strings.Fields(command)...)
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(cmdCtx, "ipmitool", args...)
+	cmd := exec.CommandContext(cmdCtx, "ipmitool", ipmiArgs(s, strings.Fields(command)...)...)
+	cmd.Env = ipmiEnv(s)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -181,22 +196,31 @@ func (c *Controller) wolCommand(s *model.Server) (bool, string) {
 		return false, "Wake-on-LAN failed: " + err.Error()
 	}
 
+	// Count successes: every send failing (e.g. no usable network interface)
+	// must not be reported as a wake.
+	var sent int
+	var lastErr error
+	send := func(ip string, port int) bool {
+		if err := c.sendWoL(packet, ip, port); err != nil {
+			lastErr = err
+			slog.Warn("Wake-on-LAN send failed", "ip", ip, "port", port, "err", err)
+			return false
+		}
+		sent++
+		slog.Info("Wake-on-LAN packet sent", "ip", ip, "port", port, "mac", mac)
+		return true
+	}
+
 	// 255.255.255.255 on the standard port 9 and the alternate port 7.
 	for _, port := range []int{9, 7} {
-		if err := sendMagicPacket(packet, "255.255.255.255", port); err != nil {
-			slog.Warn("Wake-on-LAN broadcast failed", "port", port, "err", err)
-		} else {
-			slog.Info("Wake-on-LAN packet sent", "port", port, "mac", mac)
-		}
+		send("255.255.255.255", port)
 	}
 	// Plus the server's /24 subnet-directed broadcast on port 9.
 	if parts := strings.Split(s.IPAddress, "."); len(parts) == 4 {
-		subnet := parts[0] + "." + parts[1] + "." + parts[2] + ".255"
-		if err := sendMagicPacket(packet, subnet, 9); err != nil {
-			slog.Warn("Wake-on-LAN subnet broadcast failed", "subnet", subnet, "err", err)
-		} else {
-			slog.Info("Wake-on-LAN packet sent to subnet broadcast", "subnet", subnet)
-		}
+		send(parts[0]+"."+parts[1]+"."+parts[2]+".255", 9)
+	}
+	if sent == 0 {
+		return false, "Wake-on-LAN failed: " + lastErr.Error()
 	}
 
 	// Optimistically mark the server On; the real state is confirmed on the
@@ -290,9 +314,9 @@ func (c *Controller) checkStatusIPMI(ctx context.Context, s *model.Server) strin
 	cmdCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
 	defer cancel()
 
-	args := []string{"-I", "lan", "-H", s.IPAddress, "-U", s.IPMIUser, "-P", s.IPMIPassword, "power", "status"}
 	var stdout bytes.Buffer
-	cmd := exec.CommandContext(cmdCtx, "ipmitool", args...)
+	cmd := exec.CommandContext(cmdCtx, "ipmitool", ipmiArgs(s, "power", "status")...)
+	cmd.Env = ipmiEnv(s)
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
 		return s.Status

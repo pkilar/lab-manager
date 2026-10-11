@@ -22,6 +22,13 @@ var csrfInputRE = regexp.MustCompile(`name="csrf_token" value="([a-f0-9]+)"`)
 // the store for direct inspection.
 func testServer(t *testing.T) (*httptest.Server, *http.Client, *store.Store) {
 	t.Helper()
+	srv, c, st, _ := testServerApp(t)
+	return srv, c, st
+}
+
+// testServerApp is testServer plus the App, for tests that control its clock.
+func testServerApp(t *testing.T) (*httptest.Server, *http.Client, *store.Store, *App) {
+	t.Helper()
 	dir := t.TempDir()
 	keyB64, err := secret.LoadEncryptionKey(dir)
 	if err != nil {
@@ -52,7 +59,7 @@ func testServer(t *testing.T) (*httptest.Server, *http.Client, *store.Store) {
 		Jar:           jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return srv, client, st
+	return srv, client, st, app
 }
 
 func get(t *testing.T, c *http.Client, target string) (*http.Response, string) {
