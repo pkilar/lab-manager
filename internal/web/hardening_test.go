@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -250,5 +251,78 @@ func TestLoginThrottleHTTP(t *testing.T) {
 	mustRedirect(t, resp, "/login")
 	if resp := loginAs(t, c, srv.URL, "nobody", "x"); resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("unknown user status=%d, want 429", resp.StatusCode)
+	}
+}
+
+// ---- CSRF rotation, logout, check-all -------------------------------------
+
+func TestCSRFRotatesOnLogin(t *testing.T) {
+	srv, c, _ := testServer(t)
+	_, body := get(t, c, srv.URL+"/login")
+	pre := csrfFrom(t, body)
+	mustRedirect(t, postForm(t, c, srv.URL+"/login", url.Values{
+		"username": {"admin"}, "password": {"admin"}, "csrf_token": {pre},
+	}), "/change-password")
+
+	_, cp := get(t, c, srv.URL+"/change-password")
+	if post := csrfFrom(t, cp); post == pre {
+		t.Fatal("CSRF token survived login")
+	}
+	// The pre-login token must no longer authorize a state change.
+	resp := postForm(t, c, srv.URL+"/change-password", url.Values{
+		"current_password": {"admin"}, "new_password": {"labpass123"},
+		"confirm_password": {"labpass123"}, "csrf_token": {pre},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("pre-login token: status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestLogoutIsPOSTOnly(t *testing.T) {
+	srv, c, _ := testServer(t)
+	readyUser(t, srv.URL, c)
+
+	// GET must not log out.
+	if resp, _ := get(t, c, srv.URL+"/logout"); resp.StatusCode == http.StatusFound {
+		t.Fatalf("GET /logout: status=%d, want non-redirect (405)", resp.StatusCode)
+	}
+	_, body := get(t, c, srv.URL+"/")
+	if !strings.Contains(body, `action="/logout"`) {
+		t.Fatal("index has no logout form")
+	}
+
+	// POST without a CSRF token is rejected and the session survives.
+	if resp := postForm(t, c, srv.URL+"/logout", url.Values{}); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /logout without csrf: status=%d, want 400", resp.StatusCode)
+	}
+	if resp, _ := get(t, c, srv.URL+"/"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("session lost after rejected logout: status=%d", resp.StatusCode)
+	}
+
+	old := csrfFrom(t, body)
+	mustRedirect(t, postForm(t, c, srv.URL+"/logout", url.Values{"csrf_token": {old}}), "/login")
+	resp, _ := get(t, c, srv.URL+"/")
+	mustRedirect(t, resp, "/login")
+	_, lb := get(t, c, srv.URL+"/login")
+	if csrfFrom(t, lb) == old {
+		t.Fatal("CSRF token survived logout")
+	}
+}
+
+func TestCheckAllServersRedirectsWithFlash(t *testing.T) {
+	srv, c, st := testServer(t)
+	readyUser(t, srv.URL, c)
+	const n = 20 // more than checkAllConcurrency
+	for i := range n {
+		if err := st.CreateServer(&model.Server{Name: "box" + strconv.Itoa(i), IPAddress: "10.0.0.9", BMCType: "generic"}); err != nil {
+			t.Fatalf("CreateServer: %v", err)
+		}
+	}
+	_, body := get(t, c, srv.URL+"/")
+	resp := postForm(t, c, srv.URL+"/check-all-servers", url.Values{"csrf_token": {csrfFrom(t, body)}})
+	mustRedirect(t, resp, "/")
+	_, body = get(t, c, srv.URL+"/")
+	if !strings.Contains(body, "Successfully updated status for all 20 servers") {
+		t.Error("check-all flash missing")
 	}
 }

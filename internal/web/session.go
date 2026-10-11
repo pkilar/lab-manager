@@ -116,7 +116,10 @@ func (s *sessionData) csrfToken() string {
 	return s.CSRF
 }
 
+// login and logout drop the CSRF token so the next csrfToken() mints a fresh
+// one: a token planted or observed before authentication must not survive it.
 func (s *sessionData) login(uid, iat int64, pv string) {
+	s.CSRF = ""
 	s.UID = uid
 	s.IAT = iat
 	s.PV = pv
@@ -124,6 +127,7 @@ func (s *sessionData) login(uid, iat int64, pv string) {
 }
 
 func (s *sessionData) logout() {
+	s.CSRF = ""
 	s.UID = 0
 	s.IAT = 0
 	s.PV = ""

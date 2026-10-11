@@ -38,9 +38,16 @@ func run() error {
 	// Validate configuration before anything with side effects: a strict deploy
 	// that is missing settings should fail without having created a database,
 	// an encryption key or a default admin user.
-	wolEnabled := envBool("WOL_ENABLED", false)
+	wolEnabled, err := envBool("WOL_ENABLED", false)
+	if err != nil {
+		return err
+	}
+	strict, err := envBool("LAB_MANAGER_STRICT_CONFIG", false)
+	if err != nil {
+		return err
+	}
 	bmcProxyDomain := os.Getenv("LAB_MANAGER_BMC_PROXY_DOMAIN")
-	if err := checkStrictConfig(envBool("LAB_MANAGER_STRICT_CONFIG", false),
+	if err := checkStrictConfig(strict,
 		os.Getenv("LAB_MANAGER_SECRET_KEY"), bmcProxyDomain,
 		os.Getenv("LAB_MANAGER_ENCRYPTION_KEY")); err != nil {
 		return err
@@ -50,8 +57,10 @@ func run() error {
 			"(no KVM auto-login; Console falls back to showing credentials)")
 	}
 
+	// The dir holds the DB and the encryption key; owner-only (MkdirAll leaves an
+	// existing dir's mode alone).
 	const instanceDir = "instance"
-	if err := os.MkdirAll(instanceDir, 0o755); err != nil {
+	if err := os.MkdirAll(instanceDir, 0o700); err != nil {
 		return err
 	}
 
@@ -116,9 +125,29 @@ func run() error {
 	case <-ctx.Done():
 		stop() // restore default behaviour so a second signal force-quits
 		slog.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The whole stop must fit Docker's default 10s grace period before
+		// SIGKILL, so drain requests and release BMC state (SOL payloads, iDRAC
+		// sessions -- which Shutdown doesn't track) concurrently, within 8s.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		released := make(chan struct{})
+		go func() {
+			app.Close()
+			close(released)
+		}()
+		err := srv.Shutdown(shutdownCtx)
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Still-running handlers (e.g. /check-all-servers against dead BMCs)
+			// are cut off; that's an expected way to stop, not a failure.
+			slog.Warn("graceful shutdown timed out; closing remaining connections")
+			err = srv.Close()
+		}
+		select {
+		case <-released:
+		case <-shutdownCtx.Done():
+			slog.Warn("BMC session cleanup unfinished at shutdown deadline; BMCs will time those sessions out")
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 		return nil
@@ -206,13 +235,19 @@ func loadSecretKey() ([]byte, error) {
 	return []byte(hex.EncodeToString(b)), nil
 }
 
-func envBool(key string, def bool) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+// envBool parses a boolean env var. Unknown values are an error rather than
+// false: a typo like LAB_MANAGER_STRICT_CONFIG=ture must not silently disable
+// the guard it was meant to enable.
+func envBool(key string, def bool) (bool, error) {
+	v := os.Getenv(key)
+	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "":
-		return def
+		return def, nil
 	case "true", "1", "yes", "on":
-		return true
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
 	default:
-		return false
+		return false, fmt.Errorf("invalid boolean %s=%q (want true/false, 1/0, yes/no, on/off)", key, v)
 	}
 }

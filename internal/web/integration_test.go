@@ -201,8 +201,11 @@ func TestInvalidLoginAndLogout(t *testing.T) {
 		t.Fatal("bad login missing error flash")
 	}
 
-	resp, _ = get(t, c, base+"/logout")
-	mustRedirect(t, resp, "/login")
+	// Logout is POST-only; the full flow is covered in TestLogoutIsPOSTOnly.
+	resp = postForm(t, c, base+"/logout", url.Values{})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("logout without csrf: status=%d, want 400", resp.StatusCode)
+	}
 }
 
 // TestSecurityHeaders confirms the hardening headers are present on responses.
@@ -214,6 +217,12 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
 		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+		t.Errorf("Content-Security-Policy = %q, want frame-ancestors 'none'", got)
+	}
+	if got := resp.Header.Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+		t.Errorf("Referrer-Policy = %q, want strict-origin-when-cross-origin", got)
 	}
 }
 

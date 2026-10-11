@@ -181,3 +181,39 @@ func fakeIPMITool(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+// TestAppCloseEndsLiveSOLSessions: process shutdown must end live SOL sessions
+// (releasing their BMC payloads) even though Shutdown doesn't track hijacked
+// WebSockets.
+func TestAppCloseEndsLiveSOLSessions(t *testing.T) {
+	fakeIPMITool(t)
+	srv, c, _, app := testServerApp(t)
+	authenticateAndSeed(t, srv.URL, c)
+	h := http.Header{"Cookie": {cookieHeader(t, c, srv.URL)}, "Origin": {srv.URL}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(srv.URL, 1), h)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	closed := make(chan struct{})
+	go func() {
+		app.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("App.Close did not return")
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+				t.Fatalf("SOL socket still open after App.Close: %v", err)
+			}
+			return
+		}
+	}
+}

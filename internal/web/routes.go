@@ -10,7 +10,7 @@ func (a *App) routes() *http.ServeMux {
 	// reach these endpoints).
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("POST /login", a.handleLogin)
-	mux.HandleFunc("GET /logout", a.requireLogin(false, a.handleLogout))
+	mux.HandleFunc("POST /logout", a.requireLogin(false, a.handleLogout))
 	mux.HandleFunc("GET /change-password", a.requireLogin(false, a.handleChangePassword))
 	mux.HandleFunc("POST /change-password", a.requireLogin(false, a.handleChangePassword))
 

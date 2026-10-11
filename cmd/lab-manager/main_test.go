@@ -125,3 +125,43 @@ func TestCheckStrictConfigDoesNotEchoSecrets(t *testing.T) {
 		t.Fatalf("error echoes the secret value: %q", err)
 	}
 }
+
+func TestEnvBool(t *testing.T) {
+	cases := []struct {
+		val     string
+		def     bool
+		want    bool
+		wantErr bool
+	}{
+		{"", false, false, false},
+		{"", true, true, false},
+		{"  ", true, true, false},
+		{"true", false, true, false},
+		{"TRUE", false, true, false},
+		{" 1 ", false, true, false},
+		{"yes", false, true, false},
+		{"On", false, true, false},
+		{"false", true, false, false},
+		{"0", true, false, false},
+		{"NO", true, false, false},
+		{"off", true, false, false},
+		{"ture", false, false, true}, // the typo that used to disable strict mode
+		{"2", true, false, true},
+		{"enabled", false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.val, func(t *testing.T) {
+			t.Setenv("LM_TEST_BOOL", tc.val)
+			got, err := envBool("LM_TEST_BOOL", tc.def)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), `invalid boolean LM_TEST_BOOL="`+tc.val+`"`) {
+				t.Errorf("error %q lacks key/value", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

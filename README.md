@@ -200,7 +200,7 @@ WOL_ENABLED=true docker-compose up -d
 WoL needs **all** of the following. If any is missing, the packet is sent but the
 server won't wake:
 
-1. **`WOL_ENABLED=true`** — the feature flag (also accepts `1`/`yes`/`on`).
+1. **`WOL_ENABLED=true`** — the feature flag (also accepts `1`/`yes`/`on`; a value that isn't one of those or `false`/`0`/`no`/`off` stops startup with an error rather than silently meaning "off").
 2. **Host networking** — magic packets are L2 broadcasts, so the container must
    share the host's network rather than a bridged/NAT network:
    - **Docker Compose**: already set via `network_mode: host` in `docker-compose.yml`.

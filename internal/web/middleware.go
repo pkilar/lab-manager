@@ -11,7 +11,14 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
+		h.Set("X-Frame-Options", "DENY") // legacy browsers; CSP frame-ancestors below is the modern form
+		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		// The browser default, made explicit: cross-origin navigations (e.g. from
+		// the console launch page, whose URL carries ?token=, to a BMC) send only
+		// the origin. Deliberately not no-referrer/same-origin: the Supermicro
+		// launch page auto-POSTs a login form to the BMC and some BMC CGIs
+		// require a Referer header.
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		next.ServeHTTP(w, r)
 	})
 }

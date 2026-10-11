@@ -4,6 +4,7 @@ package web
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/pkilar/lab-manager/internal/bmcproxy"
@@ -48,6 +49,18 @@ func New(st *store.Store, secretKey []byte, wolEnabled bool, bmcProxyDomain stri
 		loginLimit: newLoginLimiter(),
 		solTimings: defaultSOLTimings,
 	}, nil
+}
+
+// Close releases BMC-side state that outlives any single request: it ends every
+// live SOL session (each deactivates its single BMC payload) and logs the KVM
+// proxy's sessions out of their iDRACs. Both are hijacked or in-memory, so
+// http.Server.Shutdown neither waits for nor cleans up after them. Meant for
+// process shutdown; the two run concurrently and each is bounded (~10s).
+func (a *App) Close() {
+	var wg sync.WaitGroup
+	wg.Go(a.sol.CloseAll)
+	wg.Go(a.proxy.Close)
+	wg.Wait()
 }
 
 // Handler builds the full middleware chain, with a Host-based split: requests to

@@ -176,7 +176,7 @@ func LoadEncryptionKey(instanceDir string) ([]byte, error) {
 		return nil, err
 	}
 	encoded := []byte(base64.URLEncoding.EncodeToString(raw))
-	if err := os.MkdirAll(instanceDir, 0o755); err != nil {
+	if err := os.MkdirAll(instanceDir, 0o700); err != nil {
 		return nil, err
 	}
 

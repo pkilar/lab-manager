@@ -101,6 +101,7 @@ type baseData struct {
 	Flashes    []Flash
 	WolEnabled bool
 	CSRF       string
+	LoggedIn   bool // show the logout control in the layout
 }
 
 func (a *App) baseData(r *http.Request) baseData {
@@ -109,6 +110,7 @@ func (a *App) baseData(r *http.Request) baseData {
 		Flashes:    sess.takeFlashes(),
 		WolEnabled: a.wolEnabled,
 		CSRF:       sess.csrfToken(),
+		LoggedIn:   sess.UID != 0,
 	}
 }
 

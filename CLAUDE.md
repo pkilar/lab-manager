@@ -56,7 +56,8 @@ LAB_MANAGER_SECRET_KEY="$(openssl rand -hex 32)"
 # which is done by writing the file, not by setting this.)
 LAB_MANAGER_ENCRYPTION_KEY=
 
-# Wake-on-LAN feature flag — OFF by default (accepts true/1/yes/on). Requires host
+# Wake-on-LAN feature flag — OFF by default (true/1/yes/on or false/0/no/off; any
+# other value is a startup error, as for LAB_MANAGER_STRICT_CONFIG). Requires host
 # networking to actually wake hosts; see "Wake-on-LAN" below and the README.
 WOL_ENABLED=false
 
@@ -85,7 +86,9 @@ Packages:
 
 Cross-cutting behavior:
 
-- **CSRF**: `withCSRF` validates a per-session synchronizer token (form field `csrf_token` or `X-CSRFToken` header) on every non-GET/HEAD/OPTIONS request, returning **400** on failure. Form templates embed `{{.CSRF}}`.
+- **CSRF**: `withCSRF` validates a per-session synchronizer token (form field `csrf_token` or `X-CSRFToken` header) on every non-GET/HEAD/OPTIONS request, returning **400** on failure. Form templates embed `{{.CSRF}}`. The token is rotated on login and logout, and logout is `POST /logout` (a CSRF-protected form in the `base.html` header) so a cross-site link can't log anyone out.
+- **Security headers**: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` + `Content-Security-Policy: frame-ancestors 'none'`, and an explicit `Referrer-Policy: strict-origin-when-cross-origin` (cross-origin navigations from the `?token=` launch URL send only the origin). Deliberately not `no-referrer`: the Supermicro launcher auto-POSTs to the BMC and some BMC CGIs require a Referer.
+- **Shutdown**: on SIGTERM, `srv.Shutdown` drains requests while `App.Close` concurrently ends SOL sessions and logs out KVM proxy sessions (Shutdown tracks neither: they're hijacked/in-memory), all within 8s to fit Docker's default 10s grace period; a timed-out drain force-closes and still exits 0.
 - **Sessions**: a signed `session` cookie (HttpOnly, SameSite=Lax, `Secure` set only when the request arrived over HTTPS — directly or via `X-Forwarded-Proto`, so plain-HTTP LAN access still works). Survives restarts when `LAB_MANAGER_SECRET_KEY` is stable. Holds the user id, CSRF token, pending flashes, `iat` (login time) and `pv` (an HMAC marker of the user's password hash). `requireLogin` rejects a session older than `sessionMaxAge` (24h, server-side; the cookie itself stays a browser-session cookie), one without `iat` (pre-expiry cookies), or one whose `pv` no longer matches — so a password change revokes every other session, while `handleChangePassword` re-stamps the session that made the change.
 - **Login throttling**: `loginlimit.go` throttles per normalized **username**, not client IP (behind Traefik every request has Traefik's RemoteAddr). Five free failures, then one attempt per cooldown (1s doubling, capped at 5m; the slot is reserved under the lock so concurrent guesses can't share a window), answered with **429** without running scrypt. Unknown usernames are tracked identically and verified against a lazily-generated dummy hash, so neither timing nor throttling reveals which accounts exist. State is in-memory (resets on restart); a known username can be deliberately locked for up to 5m — inherent to per-username throttling.
 - **Input validation**: `validateIPAddress`, `validateMACAddress`, `sanitizeServerName`, `parseSOLInstance` gate the new/edit forms alongside `validBMCType`. `parseSOLInstance` rejects out-of-range values rather than clamping them — silently turning a typo into instance 1 would open the console on the wrong port and look like a BMC fault.
@@ -127,7 +130,7 @@ The most involved feature; understanding it requires reading several functions i
 - **Serial console (SOL)**: `/server/<id>/sol/launch` (xterm.js page), `/server/<id>/sol` (WebSocket; same-origin session auth + `Origin` check, gorilla/websocket)
 - **Static**: `/static/...` (embedded vendored xterm.js; no auth)
 - **iDRAC KVM proxy** (when `LAB_MANAGER_BMC_PROXY_DOMAIN` set): `/server/<id>/kvm` (login-gated initiator on the main host → mints a token, 302 to the subdomain) and, on `idrac-<id>.<domain>`, `/__labmgr/auth` (handshake) + transparent relay of everything else to the iDRAC
-- **Auth**: `/login`, `/logout`, `/change-password`
+- **Auth**: `/login`, `POST /logout`, `/change-password`
 
 Routes are registered with Go 1.22+ method+wildcard patterns (e.g. `POST /server/{id}/power/{action}`, `GET /{$}` for the exact index). All routes except `/login` require authentication via the `requireLogin` wrapper; non-integer ids 404.
 

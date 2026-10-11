@@ -32,6 +32,26 @@
             box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
         }
 
+        header .container {
+            position: relative;
+        }
+
+        .logout-form {
+            position: absolute;
+            top: 50%;
+            right: 20px;
+            transform: translateY(-50%);
+        }
+
+        .logout-form button {
+            background: none;
+            border: none;
+            color: white;
+            font: inherit;
+            cursor: pointer;
+            text-decoration: underline;
+        }
+
         h1 {
             text-align: center;
             font-size: 2rem;
@@ -295,6 +315,12 @@
     <header>
         <div class="container">
             <h1>Home Lab Server Manager</h1>
+            {{if .LoggedIn}}
+            <form class="logout-form" method="POST" action="/logout">
+                <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+                <button type="submit">Logout</button>
+            </form>
+            {{end}}
         </div>
     </header>
 
