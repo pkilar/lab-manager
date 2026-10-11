@@ -1,6 +1,7 @@
 package bmcproxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ func relayServer(t *testing.T) (*httptest.Server, *Manager, string) {
 	t.Helper()
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
 	sid, _, err := m.sessions.create(1, hostport(idrac), "-http-session-="+idracSessionValue)
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +319,12 @@ func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
 		if ce != "" {
 			h.Set("Content-Encoding", ce)
 		}
-		return &http.Response{Header: h, Body: io.NopCloser(strings.NewReader(body))}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Request:    &http.Request{Method: http.MethodGet},
+			Header:     h,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
 	}
 	bodyOf := func(r *http.Response) string {
 		b, _ := io.ReadAll(r.Body)
@@ -326,7 +333,8 @@ func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
 
 	t.Run("identity html is injected", func(t *testing.T) {
 		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
-		sid, _, _ := m.sessions.create(1, "x", "c")
+		t.Cleanup(m.Close)
+		sid, _, _ := m.sessions.create(1, "", "c")
 		m.sessions.setAutoLaunch(sid)
 		resp := newResp("text/html", "", "<html><body>x</body></html>")
 		if err := m.maybeInjectAutoLaunch(resp, sid); err != nil {
@@ -342,7 +350,8 @@ func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
 
 	t.Run("gzip body is not injected and keeps the flag", func(t *testing.T) {
 		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
-		sid, _, _ := m.sessions.create(1, "x", "c")
+		t.Cleanup(m.Close)
+		sid, _, _ := m.sessions.create(1, "", "c")
 		m.sessions.setAutoLaunch(sid)
 		resp := newResp("text/html", "gzip", "\x1f\x8b compressed bytes")
 		if err := m.maybeInjectAutoLaunch(resp, sid); err != nil {
@@ -359,7 +368,9 @@ func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
 
 func TestRewriteSetCookiesFailsClosedOnMalformedSession(t *testing.T) {
 	m := NewManager(nil, []byte("k"), "x.test")
-	sid, _, _ := m.sessions.create(1, "10.0.0.1", "-http-session-=OLD")
+	t.Cleanup(m.Close)
+	// Empty ip: Close's logout skips it rather than dialing a real address.
+	sid, _, _ := m.sessions.create(1, "", "-http-session-=OLD")
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Add("Set-Cookie", `-http-session-="abc; Path=/`) // unbalanced quote: unparseable
 	resp.Header.Add("Set-Cookie", `  -http-session-=sp"ace; Path=/`)
@@ -377,7 +388,9 @@ func TestRewriteSetCookiesFailsClosedOnMalformedSession(t *testing.T) {
 
 func TestRewriteSetCookiesCapturesWellFormedSession(t *testing.T) {
 	m := NewManager(nil, []byte("k"), "x.test")
-	sid, _, _ := m.sessions.create(1, "10.0.0.1", "-http-session-=OLD")
+	t.Cleanup(m.Close)
+	// Empty ip: Close's logout skips it rather than dialing a real address.
+	sid, _, _ := m.sessions.create(1, "", "-http-session-=OLD")
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Add("Set-Cookie", "-http-session-=NEW; Path=/; Domain=idrac.test")
 	m.rewriteSetCookies(resp, sid)
@@ -387,4 +400,223 @@ func TestRewriteSetCookiesCapturesWellFormedSession(t *testing.T) {
 	if s, _ := m.sessions.get(sid); s.idracCookie != "-http-session-=NEW" {
 		t.Fatalf("session cookie not captured: %q", s.idracCookie)
 	}
+}
+
+// If the server's address changes after login, the session cookie belongs to the
+// old BMC. It must not be replayed to the new address: the session is dropped,
+// logged out where it was issued, and the browser bounced to the initiator.
+func TestRelayIPChangeDropsSessionAndLogsOutOldBMC(t *testing.T) {
+	idrac := newFakeIDRAC(t)
+	srv := &model.Server{ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}
+	m := NewManager(fakeLookup{1: srv}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
+	sid, _, err := m.sessions.create(1, hostport(idrac), "-http-session-="+idracSessionValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { m.relay(w, r, 1) }))
+	t.Cleanup(front.Close)
+
+	srv.IPAddress = "192.0.2.1:443" // operator re-addressed the server
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/protected", nil)
+	req.AddCookie(&http.Cookie{Name: proxyCookieName, Value: sid})
+	resp, err := noRedirect().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || !strings.HasSuffix(resp.Header.Get("Location"), "/server/1/kvm") {
+		t.Fatalf("got %d Location=%q, want 302 to the initiator", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if _, ok := m.sessions.get(sid); ok {
+		t.Error("session should be removed after an address change")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for idrac.logoutCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if idrac.logoutCount() != 1 {
+		t.Errorf("old BMC logouts = %d, want 1", idrac.logoutCount())
+	}
+}
+
+func TestMaybeInjectAutoLaunchOnlyOnRealDashboard(t *testing.T) {
+	const doc = "<html><head></head><body>x</body></html>"
+	newResp := func(method string, status int, ct string, body io.ReadCloser) *http.Response {
+		return &http.Response{
+			StatusCode: status,
+			Request:    &http.Request{Method: method},
+			Header:     http.Header{"Content-Type": {ct}},
+			Body:       body,
+		}
+	}
+	str := func(s string) io.ReadCloser { return io.NopCloser(strings.NewReader(s)) }
+	setup := func(t *testing.T) (*Manager, string) {
+		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+		t.Cleanup(m.Close)
+		sid, _, _ := m.sessions.create(1, "", "c")
+		m.sessions.setAutoLaunch(sid)
+		return m, sid
+	}
+	read := func(r *http.Response) string {
+		b, _ := io.ReadAll(r.Body)
+		return string(b)
+	}
+
+	t.Run("non-200 html keeps the flag for the real dashboard", func(t *testing.T) {
+		m, sid := setup(t)
+		for _, status := range []int{http.StatusFound, http.StatusNotFound, http.StatusNotModified} {
+			r := newResp(http.MethodGet, status, "text/html", str(doc))
+			if err := m.maybeInjectAutoLaunch(r, sid); err != nil {
+				t.Fatal(err)
+			}
+			if got := read(r); got != doc {
+				t.Errorf("status %d body altered: %q", status, got)
+			}
+		}
+		r := newResp(http.MethodGet, http.StatusOK, "text/html; charset=utf-8", str(doc))
+		if err := m.maybeInjectAutoLaunch(r, sid); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(read(r), "QuickLaunch('viewer')") {
+			t.Error("a later 200 HTML must still receive the script")
+		}
+	})
+
+	t.Run("HEAD keeps the flag and Content-Length", func(t *testing.T) {
+		m, sid := setup(t)
+		r := newResp(http.MethodHead, http.StatusOK, "text/html", str(""))
+		r.Header.Set("Content-Length", "1234")
+		if err := m.maybeInjectAutoLaunch(r, sid); err != nil {
+			t.Fatal(err)
+		}
+		if r.Header.Get("Content-Length") != "1234" {
+			t.Errorf("HEAD Content-Length rewritten to %q", r.Header.Get("Content-Length"))
+		}
+		if !m.sessions.takeAutoLaunch(sid) {
+			t.Error("HEAD must not consume the one-shot flag")
+		}
+	})
+
+	t.Run("media type must be exactly text/html", func(t *testing.T) {
+		m, sid := setup(t)
+		r := newResp(http.MethodGet, http.StatusOK, "text/htmlx", str(doc))
+		if err := m.maybeInjectAutoLaunch(r, sid); err != nil {
+			t.Fatal(err)
+		}
+		if read(r) != doc || !m.sessions.takeAutoLaunch(sid) {
+			t.Error("text/htmlx must be left alone with the flag intact")
+		}
+	})
+
+	t.Run("oversized body passes through byte-identical and keeps the flag", func(t *testing.T) {
+		m, sid := setup(t)
+		big := strings.Repeat("a", maxInjectBody+10)
+		closed := false
+		body := struct {
+			io.Reader
+			io.Closer
+		}{strings.NewReader(big), closerFunc(func() error { closed = true; return nil })}
+		r := newResp(http.MethodGet, http.StatusOK, "text/html", body)
+		if err := m.maybeInjectAutoLaunch(r, sid); err != nil {
+			t.Fatal(err)
+		}
+		if got := read(r); got != big {
+			t.Errorf("oversized body altered (len %d, want %d)", len(got), len(big))
+		}
+		_ = r.Body.Close()
+		if !closed {
+			t.Error("original body Close must be preserved")
+		}
+		if !m.sessions.takeAutoLaunch(sid) {
+			t.Error("oversized body must not consume the one-shot flag")
+		}
+	})
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
+
+func TestRelayBlocksCrossSiteWrites(t *testing.T) {
+	front, _, sid := relayServer(t)
+	const host = "idrac-1.pi.home.kilar.net"
+	do := func(method, origin string) int {
+		req, _ := http.NewRequest(method, front.URL+"/protected", nil)
+		req.Host = host
+		req.AddCookie(&http.Cookie{Name: proxyCookieName, Value: sid})
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := noRedirect().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	cases := []struct {
+		name, method, origin string
+		want                 int
+	}{
+		{"same-host POST", http.MethodPost, "https://" + host, http.StatusOK},
+		{"same-host POST other port", http.MethodPost, "https://" + host + ":5900", http.StatusOK},
+		{"POST without Origin", http.MethodPost, "", http.StatusOK},
+		{"sibling-host POST", http.MethodPost, "https://evil.pi.home.kilar.net", http.StatusForbidden},
+		{"Origin null POST", http.MethodPost, "null", http.StatusForbidden},
+		{"sibling-host DELETE", http.MethodDelete, "https://idrac-2.pi.home.kilar.net", http.StatusForbidden},
+		{"GET with foreign Origin", http.MethodGet, "https://evil.pi.home.kilar.net", http.StatusOK},
+	}
+	for _, c := range cases {
+		if got := do(c.method, c.origin); got != c.want {
+			t.Errorf("%s: status %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestRelayBlocksCrossSiteWebSocket(t *testing.T) {
+	front, _, sid := relayServer(t)
+	u, _ := url.Parse(front.URL)
+	u.Scheme = "ws"
+	const host = "idrac-1.pi.home.kilar.net"
+	dial := func(origin string) error {
+		h := http.Header{"Cookie": {proxyCookieName + "=" + sid}, "Host": {host}, "Origin": {origin}}
+		conn, _, err := websocket.DefaultDialer.Dial(u.String()+"/ws", h)
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+	// The console page is on :443 and its socket on :5900 of the same host.
+	if err := dial("https://" + host); err != nil {
+		t.Errorf("same-host upgrade refused: %v", err)
+	}
+	if err := dial("https://evil.pi.home.kilar.net"); err == nil {
+		t.Error("sibling-host upgrade must be refused")
+	} else if !errors.Is(err, websocket.ErrBadHandshake) {
+		t.Errorf("unexpected dial error: %v", err)
+	}
+}
+
+func TestCloseLogsOutSessionsOnce(t *testing.T) {
+	idrac := newFakeIDRAC(t)
+	m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+	if _, _, err := m.sessions.create(1, hostport(idrac), "-http-session-="+idracSessionValue); err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+	if idrac.logoutCount() != 1 {
+		t.Fatalf("Close should log out the live session, got %d logouts", idrac.logoutCount())
+	}
+	m.Close() // idempotent
+	if idrac.logoutCount() != 1 {
+		t.Errorf("second Close must be a no-op, got %d logouts", idrac.logoutCount())
+	}
+	select {
+	case <-m.done:
+	default:
+		t.Error("GC done channel should be closed")
+	}
+	var nilMgr *Manager
+	nilMgr.Close() // nil-safe
 }

@@ -6,12 +6,15 @@ import (
 	"testing"
 )
 
-func newTestManager() *Manager {
-	return NewManager(fakeLookup{}, []byte("secret"), "pi.home.kilar.net")
+func newTestManager(t *testing.T) *Manager {
+	t.Helper()
+	m := NewManager(fakeLookup{}, []byte("secret"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
+	return m
 }
 
 func TestHostServerID(t *testing.T) {
-	m := newTestManager()
+	m := newTestManager(t)
 	cases := []struct {
 		host   string
 		wantID int64
@@ -36,7 +39,7 @@ func TestEnabledAndURLs(t *testing.T) {
 	if NewManager(fakeLookup{}, nil, "").Enabled() {
 		t.Fatal("empty domain should be disabled")
 	}
-	m := newTestManager()
+	m := newTestManager(t)
 	if !m.Enabled() {
 		t.Fatal("configured domain should be enabled")
 	}

@@ -31,6 +31,7 @@ func noRedirect() *http.Client {
 func TestHandshakeLogsInAndSetsSession(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac), RedfishUser: "root", RedfishPassword: "calvin"}}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
 	front := proxyFront(t, m)
 
 	tok := m.MintToken(1)
@@ -92,6 +93,7 @@ func TestSafeForwardPathBlocksOpenRedirect(t *testing.T) {
 func TestLogoutIDRACReleasesSession(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
 	m.logoutIDRAC(hostport(idrac), "-http-session-="+idracSessionValue)
 	if idrac.logoutCount() != 1 {
 		t.Fatalf("logoutIDRAC should call /data/logout once, got %d", idrac.logoutCount())
@@ -101,6 +103,7 @@ func TestLogoutIDRACReleasesSession(t *testing.T) {
 func TestHandshakeLogsOutPriorSession(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac), RedfishUser: "root", RedfishPassword: "calvin"}}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
 	front := proxyFront(t, m)
 
 	// Two handshakes for the same server: the second must log the first iDRAC
@@ -131,6 +134,7 @@ func TestHandshakeLogsOutPriorSession(t *testing.T) {
 func TestHandshakeBadTokenBounces(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
 	front := proxyFront(t, m)
 
 	req, _ := http.NewRequest(http.MethodGet, front.URL+"/__labmgr/auth?token=bad", nil)
@@ -148,6 +152,7 @@ func TestHandshakeBadTokenBounces(t *testing.T) {
 
 func TestHandlerRejectsUnknownHost(t *testing.T) {
 	m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
 	front := proxyFront(t, m)
 	req, _ := http.NewRequest(http.MethodGet, front.URL+"/", nil)
 	req.Host = "lab.pi.home.kilar.net" // not a proxy host
@@ -165,6 +170,7 @@ func TestHandshakeLoginFailureShowsError(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	// Wrong creds so the fake's /data/login returns authResult 5.
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac), RedfishUser: "root", RedfishPassword: "wrong"}}, []byte("s"), "pi.home.kilar.net")
+	t.Cleanup(m.Close)
 	front := proxyFront(t, m)
 	tok := m.MintToken(1)
 	req, _ := http.NewRequest(http.MethodGet, front.URL+"/__labmgr/auth?token="+tok, nil)

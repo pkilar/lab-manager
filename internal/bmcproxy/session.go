@@ -86,6 +86,14 @@ func (s *sessionStore) setAutoLaunch(id string) {
 	}
 }
 
+// pendingAutoLaunch reports whether the session is flagged, without clearing it.
+func (s *sessionStore) pendingAutoLaunch(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	return ok && sess.autoLaunch
+}
+
 // takeAutoLaunch reports whether the session is flagged for auto-launch and
 // clears the flag, so exactly one document (the first dashboard load) is
 // injected. Returns false for an unknown or already-consumed session.
@@ -108,6 +116,30 @@ func (s *sessionStore) updateCookie(id, idracCookie string) {
 	if sess, ok := s.sessions[id]; ok {
 		sess.idracCookie = idracCookie
 	}
+}
+
+// remove deletes a session and returns it so the caller can log it out of the
+// iDRAC it was issued by.
+func (s *sessionStore) remove(id string) (*proxySession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if ok {
+		delete(s.sessions, id)
+	}
+	return sess, ok
+}
+
+// drain removes and returns every session (expired or not), for shutdown.
+func (s *sessionStore) drain() []*proxySession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all := make([]*proxySession, 0, len(s.sessions))
+	for id, sess := range s.sessions {
+		all = append(all, sess)
+		delete(s.sessions, id)
+	}
+	return all
 }
 
 // gc removes expired sessions and returns them so the caller can log them out

@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkilar/lab-manager/internal/model"
@@ -34,12 +36,15 @@ type Manager struct {
 	secret   []byte
 	domain   string // e.g. "pi.home.kilar.net"; empty disables the feature
 	sessions *sessionStore
+
+	done      chan struct{} // closed by Close to stop sessionGC
+	closeOnce sync.Once
 }
 
 // NewManager builds a proxy Manager and starts its session GC. A blank domain
 // yields a disabled manager (Enabled() == false).
 func NewManager(lookup ServerLookup, secret []byte, domain string) *Manager {
-	m := &Manager{lookup: lookup, secret: secret, domain: domain, sessions: newSessionStore()}
+	m := &Manager{lookup: lookup, secret: secret, domain: domain, sessions: newSessionStore(), done: make(chan struct{})}
 	if m.Enabled() {
 		go m.sessionGC()
 	}
@@ -49,11 +54,35 @@ func NewManager(lookup ServerLookup, secret []byte, domain string) *Manager {
 func (m *Manager) sessionGC() {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
-	for range t.C {
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-t.C:
+		}
 		for _, sess := range m.sessions.gc() {
 			m.logoutIDRAC(sess.ip, sess.idracCookie)
 		}
 	}
+}
+
+// Close stops the session GC and logs every live proxy session out of its
+// iDRAC, returning once all logouts finish (each is bounded by logoutIDRAC's own
+// 10s timeout). It is meant for process shutdown: without it the sessions would
+// sit in the BMCs' small web-session tables until the BMC times them out.
+// Idempotent and nil-safe.
+func (m *Manager) Close() {
+	if m == nil {
+		return
+	}
+	m.closeOnce.Do(func() {
+		close(m.done)
+		var wg sync.WaitGroup
+		for _, sess := range m.sessions.drain() {
+			wg.Go(func() { m.logoutIDRAC(sess.ip, sess.idracCookie) })
+		}
+		wg.Wait()
+	})
 }
 
 // logoutIDRAC releases an iDRAC web session (-http-session-) so repeated KVM
@@ -159,9 +188,13 @@ func upstreamHost(ip, inboundHost string) string {
 // server-side session cookie. A single ReverseProxy handles both plain HTTP and
 // the KVM WebSocket (it natively tunnels Upgrade requests).
 func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
+	if crossSiteWrite(r) {
+		http.Error(w, "cross-site request refused", http.StatusForbidden)
+		return
+	}
 	sess, sid, ok := m.sessionFor(r)
 	if !ok || sess.serverID != id {
-		http.Redirect(w, r, m.appBaseURL(r)+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
+		m.bounceToInitiator(w, r, id)
 		return
 	}
 	s, err := m.lookup.GetServer(id)
@@ -169,7 +202,52 @@ func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
 		http.Error(w, "server not found", http.StatusNotFound)
 		return
 	}
+	if s.IPAddress != sess.ip {
+		// The server's address changed since login: the session cookie belongs
+		// to the old BMC and must not be replayed to whatever is at the new
+		// address. Release it where it was issued and force a fresh handshake.
+		if removed, ok := m.sessions.remove(sid); ok {
+			go m.logoutIDRAC(removed.ip, removed.idracCookie)
+		}
+		m.bounceToInitiator(w, r, id)
+		return
+	}
 	m.serveHTTP(w, r, sid, upstreamHost(s.IPAddress, r.Host), sess.idracCookie)
+}
+
+func (m *Manager) bounceToInitiator(w http.ResponseWriter, r *http.Request, id int64) {
+	http.Redirect(w, r, m.appBaseURL(r)+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
+}
+
+// crossSiteWrite reports whether r is a state-changing request or a WebSocket
+// upgrade carrying an Origin from a different host. The proxy cookie is
+// SameSite=Lax and Rewrite overwrites Origin with the BMC's, so a page on a
+// sibling *.<domain> host (same-site) could otherwise drive the iDRAC with the
+// operator's session. Ports are ignored on purpose: the console WebSocket on
+// :5900 is opened by the :443 page of the same host. A missing Origin is
+// allowed (browsers always send one on these requests; non-browser clients
+// can't carry the victim's cookie); "null" yields an empty hostname and fails.
+func crossSiteWrite(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		if !isWebSocketUpgrade(r) {
+			return false
+		}
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(u.Hostname(), stripPort(r.Host))
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(strings.Join(r.Header.Values("Connection"), ",")), "upgrade") &&
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
 }
 
 func (m *Manager) sessionFor(r *http.Request) (proxySession, string, bool) {
@@ -273,13 +351,21 @@ const autoLaunchScript = `<script>(function(){
   })();
 })();</script>`
 
+// maxInjectBody caps how much of a response maybeInjectAutoLaunch will buffer.
+// The dashboard shell is a few KiB; anything larger is not it.
+const maxInjectBody = 4 << 20
+
 // maybeInjectAutoLaunch injects autoLaunchScript into the first dashboard
 // document of a freshly authenticated session, then clears the one-shot flag so
-// later navigation is untouched. Only text/html documents qualify; assets and
-// XHR/JSON responses pass through. Accept-Encoding was stripped upstream, so the
-// body is identity and needs no gzip handling.
+// later navigation is untouched. Only a 200 GET answered with exactly text/html
+// qualifies; redirects, errors, HEADs, assets and XHR/JSON pass through without
+// touching the flag. Accept-Encoding was stripped upstream, so the body is
+// identity and needs no gzip handling.
 func (m *Manager) maybeInjectAutoLaunch(resp *http.Response, sid string) error {
-	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+	if resp.Request == nil || resp.Request.Method != http.MethodGet || resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "text/html" {
 		return nil
 	}
 	// Refuse to touch a compressed body: injecting into gzip bytes corrupts the
@@ -290,13 +376,27 @@ func (m *Manager) maybeInjectAutoLaunch(resp *http.Response, sid string) error {
 	if resp.Header.Get("Content-Encoding") != "" {
 		return nil
 	}
-	if !m.sessions.takeAutoLaunch(sid) {
+	if !m.sessions.pendingAutoLaunch(sid) {
 		return nil
 	}
-	body, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
+	orig := resp.Body
+	body, err := io.ReadAll(io.LimitReader(orig, maxInjectBody+1))
 	if err != nil {
+		_ = orig.Close()
 		return err
+	}
+	if len(body) > maxInjectBody {
+		// Not a dashboard shell: hand the body on untouched, flag preserved.
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(body), orig), orig}
+		return nil
+	}
+	_ = orig.Close()
+	if !m.sessions.takeAutoLaunch(sid) {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return nil
 	}
 	body = injectScript(body, autoLaunchScript)
 	resp.Body = io.NopCloser(bytes.NewReader(body))
