@@ -147,7 +147,8 @@ Go `html/template`, embedded from `internal/web/templates/` via `//go:embed`. Th
 ## Deployment Options
 
 ### Docker Compose
-- Built from `Dockerfile` — a multi-stage build: `golang:1.27-alpine` compiles a static (`CGO_ENABLED=0`) binary, copied into a minimal `alpine` runtime that installs only `ipmitool` and `ca-certificates`. Templates and the timezone DB are embedded, so nothing else is copied.
+- Built from `Dockerfile` — a multi-stage build: `golang:1.27-alpine` compiles a static (`CGO_ENABLED=0`) binary, copied into a minimal `alpine:3.24` runtime that installs only `ipmitool`, `ca-certificates` and `su-exec`. Templates and the timezone DB are embedded, so nothing else is copied.
+- **Runs unprivileged.** `docker-entrypoint.sh` starts as root only to `chown -R` + `chmod 0700` `/app/instance`, then `su-exec`s the app as `PUID:PGID` (default `10001:10001`; `PUID=0` and non-numeric values are refused). Re-owning on every start migrates volumes written by older root-run images (root-owned `servers.db` / 0600 `.encryption_key`) with no manual step. `docker-compose.yml` sets `PUID`/`PGID` to `1000` so the bind-mounted `./instance` stays usable from the host; the Swarm stack uses the default. Nothing the app does needs root (BMC calls and WoL broadcasts are ordinary sockets; it listens on 5000).
 - Uses host networking for Wake-on-LAN broadcast packets.
 - Bind-mounts `./instance` for the SQLite DB and `.encryption_key`.
 

@@ -24,4 +24,9 @@ services:
       # real base domain plus the Traefik idrac-* router in docker-stack.yml.
       #   LAB_MANAGER_BMC_PROXY_DOMAIN=localhost docker compose up -d --build
       - LAB_MANAGER_BMC_PROXY_DOMAIN=${LAB_MANAGER_BMC_PROXY_DOMAIN:-}
+      # The app runs unprivileged; the entrypoint re-owns ./instance to this
+      # uid:gid on start. Default to the usual first host user so the bind-mounted
+      # DB and key stay readable from the host (e.g. `sqlite3 instance/servers.db`).
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
     restart: unless-stopped

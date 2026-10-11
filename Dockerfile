@@ -21,17 +21,25 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 
 # ---- runtime stage ---------------------------------------------------------
 # ipmitool is required for IPMI power control; ca-certificates for outbound TLS;
-# busybox wget (bundled in alpine) backs the compose/stack healthcheck.
-FROM alpine:3.21
+# su-exec drops root in the entrypoint; busybox wget (bundled in alpine) backs
+# the compose/stack healthcheck.
+FROM alpine:3.24
 
-RUN apk add --no-cache ipmitool ca-certificates
+RUN apk add --no-cache ipmitool ca-certificates su-exec
 
 WORKDIR /app
 COPY --from=build /out/lab-manager /app/lab-manager
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Created here for non-volume runs; compose/stack bind- or named-mount over it.
 RUN mkdir -p /app/instance
 
 EXPOSE 5000
 
-ENTRYPOINT ["/app/lab-manager"]
+# The entrypoint starts as root only to re-own /app/instance (migrating volumes
+# written by older root-run images), then execs the app as an unprivileged
+# user: 10001:10001 by default, PUID/PGID to override. Nothing the app does
+# needs root: ipmitool, Redfish and WoL broadcasts are ordinary UDP/TCP from a
+# high port, and it listens on 5000.
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["/app/lab-manager"]

@@ -177,6 +177,9 @@ docker run --rm -i -v lab-manager_lab_manager_instance:/v alpine \
   sh -c 'cat > /v/.encryption_key && chmod 600 /v/.encryption_key' < lab-manager.key
 ```
 
+The restored file is root-owned; that's fine — the container entrypoint re-owns
+`/app/instance` to the unprivileged app user on every start.
+
 ### Wake-on-LAN (opt-in)
 
 Wake-on-LAN (WoL) powers a server **on** by broadcasting a "magic packet" to its
@@ -314,6 +317,11 @@ Only iDRAC servers with stored credentials show the KVM button.
 - Default admin credentials should be changed immediately
 - Server credentials encrypted at rest with Fernet (key in `instance/.encryption_key`)
 - SSL verification disabled for Redfish connections
+- The container runs the app as an unprivileged user: the entrypoint re-owns
+  `/app/instance` and drops root via `su-exec`. Default uid/gid `10001`; set
+  `PUID`/`PGID` to override (`docker-compose.yml` uses `1000` so the bind-mounted
+  `./instance` stays readable from the host). Volumes from older root-run images
+  are migrated automatically on first start.
 - SECRET_KEY should be set for production deployments
 
 ## Development
