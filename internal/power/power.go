@@ -1,5 +1,5 @@
-// Package power implements server power control over Redfish, IPMI, and
-// Wake-on-LAN, and live power-status checks.
+// Package power implements server power control over Redfish, IPMI,
+// Wake-on-LAN, and PiKVM ATX (kvmd HTTP API), and live power-status checks.
 package power
 
 import (
@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/pkilar/lab-manager/internal/model"
 	"github.com/pkilar/lab-manager/internal/store"
 )
@@ -56,6 +57,10 @@ func NewController(st *store.Store, wolEnabled bool) *Controller {
 // Send selects exactly one protocol by credential availability — not a fallback
 // chain. The context bounds the underlying network/exec call.
 func (c *Controller) Send(ctx context.Context, s *model.Server, command string) (bool, string) {
+	// PiKVM speaks neither Redfish nor IPMI, so it must be routed first.
+	if s.BMCType == model.BMCPiKVM {
+		return c.pikvmCommand(ctx, s, command)
+	}
 	switch {
 	case s.RedfishUser != "":
 		return c.redfishCommand(ctx, s, command)
@@ -130,6 +135,209 @@ func (c *Controller) redfishCommand(ctx context.Context, s *model.Server, comman
 		return false, fmt.Sprintf("Restart failed: HTTP %d", resp.StatusCode)
 	default:
 		return false, "Command not implemented"
+	}
+}
+
+// pikvmCreds returns the PiKVM login: Redfish credentials win over IPMI ones
+// (the same precedence as the console package).
+func pikvmCreds(s *model.Server) (user, pass string) {
+	if s.RedfishUser != "" {
+		return s.RedfishUser, s.RedfishPassword
+	}
+	return s.IPMIUser, s.IPMIPassword
+}
+
+// pikvmRequest builds a kvmd API request authenticated statelessly with the
+// X-KVMD-User/X-KVMD-Passwd headers (no session is created).
+func pikvmRequest(ctx context.Context, s *model.Server, method, path string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, "https://"+s.IPAddress+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	user, pass := pikvmCreds(s)
+	req.Header.Set("X-KVMD-User", user)
+	req.Header.Set("X-KVMD-Passwd", pass)
+	return req, nil
+}
+
+// pikvmCommand drives the PiKVM ATX board via POST /api/atx/power. A PiKVM row
+// with no credentials fails outright; it never falls through to Wake-on-LAN
+// (the PiKVM is the BMC, not the host, so a magic packet would be wrong here).
+func (c *Controller) pikvmCommand(ctx context.Context, s *model.Server, command string) (bool, string) {
+	var action, okStatus, okMessage, failPrefix string
+	switch command {
+	case "power on":
+		action, okStatus, okMessage, failPrefix = "on", "On", "Power on command sent", "Power on failed"
+	case "power off":
+		action, okStatus, okMessage, failPrefix = "off", "Off", "Power off command sent", "Power off failed"
+	case "power cycle", "reset":
+		action, okStatus, okMessage, failPrefix = "reset_hard", "On", "Restart command sent", "Restart failed"
+	default:
+		return false, "Command not implemented"
+	}
+	if user, _ := pikvmCreds(s); user == "" {
+		return false, "No authentication credentials configured"
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
+	defer cancel()
+	req, err := pikvmRequest(reqCtx, s, http.MethodPost, "/api/atx/power?action="+action)
+	if err != nil {
+		return false, err.Error()
+	}
+	resp, err := bmcHTTPClient.Do(req)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	if resp.StatusCode == http.StatusOK {
+		c.touchStatus(s, okStatus)
+		return true, okMessage
+	}
+	var e struct {
+		Result struct {
+			Error    string `json:"error"`
+			ErrorMsg string `json:"error_msg"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(body, &e) == nil && (e.Result.Error != "" || e.Result.ErrorMsg != "") {
+		detail := e.Result.Error
+		if e.Result.ErrorMsg != "" {
+			if detail != "" {
+				detail += ": "
+			}
+			detail += e.Result.ErrorMsg
+		}
+		return false, fmt.Sprintf("%s: %s (HTTP %d)", failPrefix, detail, resp.StatusCode)
+	}
+	return false, fmt.Sprintf("%s: HTTP %d", failPrefix, resp.StatusCode)
+}
+
+// pikvmVideoWindow is how long pikvmVideoSignal listens for an online video
+// signal before concluding there is none. A var so tests can shrink it.
+var pikvmVideoWindow = 5 * time.Second
+
+// checkStatusPiKVM decides the power state of the host behind a PiKVM. The ATX
+// power LED (GET /api/atx) is trusted only when it reads on: an LED sense input
+// that is not wired (common on DIY boards) reads off forever, so a running host
+// would show Off. When the LED is off, or the ATX board is disabled, the HDMI
+// capture is consulted instead (pikvmVideoSignal): a live signal means On; a
+// capture that ran for the whole window without one means Off. Known false-Off
+// case: a host that cuts its HDMI output when the display sleeps (DPMS) reads
+// Off. Any failure, missing credentials, or an undetermined video state yields
+// the cached status.
+func (c *Controller) checkStatusPiKVM(ctx context.Context, s *model.Server) string {
+	if user, _ := pikvmCreds(s); user == "" {
+		return s.Status
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
+	defer cancel()
+	req, err := pikvmRequest(reqCtx, s, http.MethodGet, "/api/atx")
+	if err != nil {
+		return s.Status
+	}
+	resp, err := bmcHTTPClient.Do(req)
+	if err != nil {
+		return s.Status
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return s.Status
+	}
+	var data struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Enabled bool `json:"enabled"`
+			LEDs    struct {
+				Power bool `json:"power"`
+			} `json:"leds"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data); err != nil || !data.OK {
+		return s.Status
+	}
+	if data.Result.Enabled && data.Result.LEDs.Power {
+		c.touchStatus(s, "On")
+		return "On"
+	}
+	online, known := pikvmVideoSignal(ctx, s)
+	switch {
+	case online:
+		c.touchStatus(s, "On")
+		return "On"
+	case known:
+		c.touchStatus(s, "Off")
+		return "Off"
+	}
+	return s.Status
+}
+
+// pikvmVideoSignal listens on the kvmd event WebSocket (/api/ws?stream=1, same
+// stateless header auth as the HTTP calls) for the HDMI capture state. kvmd
+// sends JSON {"event_type", "event"} messages; only "streamer" (legacy
+// "streamer_state") events matter, and later ones are partial, so each is
+// scanned for event.streamer.source, which is null while the capture process is
+// not running and otherwise carries "online". online is true as soon as a
+// source reports online. known means a source was reported at all, so the
+// capture ran: with online false that is a definitive no-signal after the full
+// window (a cold start can report a transient offline first, so the first
+// false is never final). Dial, auth, or read failures return known=false
+// unless a source was already seen.
+func pikvmVideoSignal(ctx context.Context, s *model.Server) (online, known bool) {
+	user, pass := pikvmCreds(s)
+	hdr := http.Header{}
+	hdr.Set("X-KVMD-User", user)
+	hdr.Set("X-KVMD-Passwd", pass)
+	d := websocket.Dialer{
+		// BMCs ship self-signed certs, as with bmcHTTPClient.
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed BMC certificate
+		HandshakeTimeout: 10 * time.Second,
+	}
+	conn, resp, err := d.DialContext(ctx, "wss://"+s.IPAddress+"/api/ws?stream=1", hdr)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err != nil {
+		return false, false
+	}
+	// Close politely so kvmd drops the client and stops the capture after its
+	// own delay.
+	defer func() {
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		_ = conn.Close()
+	}()
+	conn.SetReadLimit(1 << 20)
+	_ = conn.SetReadDeadline(time.Now().Add(pikvmVideoWindow))
+	for {
+		typ, msg, err := conn.ReadMessage()
+		if err != nil {
+			return false, known
+		}
+		if typ != websocket.TextMessage {
+			continue
+		}
+		var ev struct {
+			Type  string `json:"event_type"`
+			Event struct {
+				Streamer struct {
+					Source *struct {
+						Online bool `json:"online"`
+					} `json:"source"`
+				} `json:"streamer"`
+			} `json:"event"`
+		}
+		if json.Unmarshal(msg, &ev) != nil || (ev.Type != "streamer" && ev.Type != "streamer_state") {
+			continue
+		}
+		if src := ev.Event.Streamer.Source; src != nil {
+			known = true
+			if src.Online {
+				return true, true
+			}
+		}
 	}
 }
 
@@ -279,6 +487,9 @@ func sendMagicPacket(packet []byte, ip string, port int) error {
 // CheckStatus queries the live power state, persists it, and returns it. On any
 // error it returns the last-known cached status.
 func (c *Controller) CheckStatus(ctx context.Context, s *model.Server) string {
+	if s.BMCType == model.BMCPiKVM {
+		return c.checkStatusPiKVM(ctx, s)
+	}
 	switch {
 	case s.RedfishUser != "":
 		return c.checkStatusRedfish(ctx, s)

@@ -37,6 +37,7 @@
                         {{if eq .BMCType "idrac"}}iDRAC
                         {{else if eq .BMCType "supermicro"}}Supermicro
                         {{else if eq .BMCType "ilo"}}iLO
+                        {{else if eq .BMCType "pikvm"}}PiKVM
                         {{else}}Generic
                         {{end}}
                     </span>
@@ -76,7 +77,13 @@
                             Console
                         </button>
                         {{end}}
-                        {{if .HasCreds}}
+                        {{if .TerminalHref}}
+                        {{/* PiKVM: its own web terminal (ttyd) instead of IPMI
+                             SOL, which a PiKVM does not serve. */}}
+                        <a href="{{.TerminalHref}}" target="_blank" rel="noopener"
+                            class="btn btn-info btn-sm"
+                            title="{{if .ConsoleAutoLogin}}Opens the PiKVM web terminal already logged in{{else}}Opens the PiKVM web terminal (use 🔑 for credentials){{end}}">📟 Terminal</a>
+                        {{else if .HasCreds}}
                         <a href="/server/{{.ID}}/sol/launch" target="_blank" rel="noopener"
                             class="btn btn-info btn-sm" title="IPMI Serial-over-LAN console">📟 Serial</a>
                         {{end}}

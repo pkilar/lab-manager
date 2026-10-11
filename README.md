@@ -6,6 +6,7 @@ A Go web application for managing physical servers via IPMI and Redfish protocol
 
 - Web-based server management interface
 - Dual protocol support: Redfish and IPMI
+- PiKVM support: KVM and web terminal buttons, power via its ATX API
 - Power control: On, Off, Restart, Cycle
 - Real-time server status monitoring
 - Wake-on-LAN support (optional, disabled by default)
@@ -84,8 +85,8 @@ LAB_MANAGER_ENCRYPTION_KEY=
 # Wake-on-LAN feature toggle (disabled by default). See "Wake-on-LAN" below.
 WOL_ENABLED=false
 
-# iDRAC KVM reverse-proxy base domain (disabled by default). See "iDRAC KVM
-# auto-login" below. Swarm/Traefik deploy only.
+# BMC KVM reverse-proxy base domain (disabled by default). See "iDRAC KVM
+# auto-login" and "PiKVM" below. Swarm/Traefik deploy only.
 LAB_MANAGER_BMC_PROXY_DOMAIN=
 ```
 
@@ -269,6 +270,31 @@ host-networked `docker-compose` setup. Requirements:
 
 Only iDRAC servers with stored credentials show the KVM button.
 
+### PiKVM
+
+Choose **PiKVM** as the BMC type and enter the PiKVM web login (e.g. `admin`) as the
+**Redfish** username/password (the IPMI fields work too; Redfish wins if both are
+set). A PiKVM row gets:
+
+- **Console**: the PiKVM KVM page (`/kvm/`).
+- **📟 Terminal**: the PiKVM web terminal (`/extras/webterm/ttyd/`), in place of the
+  IPMI serial console, which a PiKVM does not serve.
+- **Start / Stop / Restart**: the PiKVM ATX API (`/api/atx`), so these only work if
+  the ATX board's button wires are connected to the host. Stop is a short (graceful)
+  power-button press; Restart presses the reset button.
+- **Status** trusts the ATX power LED only when it reads on. Otherwise it checks the
+  HDMI video signal, which takes up to 5s when there is no signal. This covers
+  builds whose LED sense wire isn't connected, where the LED always reads off. A host
+  that turns HDMI off when its display sleeps will show Off.
+
+With `LAB_MANAGER_BMC_PROXY_DOMAIN` set, Console and Terminal open already logged in
+through `pikvm-<id>.<your-domain>`. This is the same reverse proxy as the iDRAC
+feature, and the `docker-stack.yml` router already matches `pikvm-*`. The proxy is
+the only way to log in automatically: PiKVM's `auth_token` cookie is
+`SameSite=Strict`, so a cookie set by a cross-site login is never sent on the
+navigation that follows. Without the proxy, both buttons open the PiKVM's own pages
+and you log in there (🔑 shows the credentials).
+
 ## Usage
 
 ### Adding a Server
@@ -305,6 +331,10 @@ Only iDRAC servers with stored credentials show the KVM button.
 - Traditional IPMI over LAN
 - Uses `ipmitool` command-line utility
 - Fallback option when Redfish unavailable
+
+**PiKVM ATX** (BMC type PiKVM only):
+- kvmd HTTP API (`/api/atx`, `/api/atx/power`), HTTPS with SSL verification disabled
+- Stateless auth via the `X-KVMD-User` / `X-KVMD-Passwd` headers, so no session is left behind
 
 ### Database
 

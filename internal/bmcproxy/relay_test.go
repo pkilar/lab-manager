@@ -22,12 +22,12 @@ func relayServer(t *testing.T) (*httptest.Server, *Manager, string) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}}, []byte("s"), "pi.home.kilar.net")
 	t.Cleanup(m.Close)
-	sid, _, err := m.sessions.create(1, hostport(idrac), "-http-session-="+idracSessionValue)
+	sid, _, err := m.sessions.create(idracVendor, 1, hostport(idrac), "-http-session-="+idracSessionValue)
 	if err != nil {
 		t.Fatal(err)
 	}
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.relay(w, r, 1)
+		m.relay(w, r, 1, idracVendor)
 	}))
 	t.Cleanup(front.Close)
 	return front, m, sid
@@ -81,7 +81,7 @@ func TestRelayPreservesRawQueryAndStripsForwardingHeaders(t *testing.T) {
 }
 
 // sessionStore.get() used to hand out the *proxySession itself after releasing
-// the mutex, so relay read sess.idracCookie unlocked while a concurrent
+// the mutex, so relay read sess.bmcCookie unlocked while a concurrent
 // /rotate response rewrote that same field under the lock via updateCookie.
 // The raced field is the credential injected upstream. Overlapping relays trip
 // the race detector; this passes only once get() returns a copy.
@@ -161,8 +161,8 @@ func TestRelayRewritesLocationAndCookies(t *testing.T) {
 			t.Fatalf("passthrough cookie kept its Domain: %q", sc)
 		}
 	}
-	if g, _ := m.sessions.get(sid); g.idracCookie != "-http-session-=ROTATED" {
-		t.Fatalf("rotation not captured: %q", g.idracCookie)
+	if g, _ := m.sessions.get(sid); g.bmcCookie != "-http-session-=ROTATED" {
+		t.Fatalf("rotation not captured: %q", g.bmcCookie)
 	}
 }
 
@@ -334,7 +334,7 @@ func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
 	t.Run("identity html is injected", func(t *testing.T) {
 		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
 		t.Cleanup(m.Close)
-		sid, _, _ := m.sessions.create(1, "", "c")
+		sid, _, _ := m.sessions.create(idracVendor, 1, "", "c")
 		m.sessions.setAutoLaunch(sid)
 		resp := newResp("text/html", "", "<html><body>x</body></html>")
 		if err := m.maybeInjectAutoLaunch(resp, sid); err != nil {
@@ -351,7 +351,7 @@ func TestMaybeInjectAutoLaunchGuards(t *testing.T) {
 	t.Run("gzip body is not injected and keeps the flag", func(t *testing.T) {
 		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
 		t.Cleanup(m.Close)
-		sid, _, _ := m.sessions.create(1, "", "c")
+		sid, _, _ := m.sessions.create(idracVendor, 1, "", "c")
 		m.sessions.setAutoLaunch(sid)
 		resp := newResp("text/html", "gzip", "\x1f\x8b compressed bytes")
 		if err := m.maybeInjectAutoLaunch(resp, sid); err != nil {
@@ -370,19 +370,19 @@ func TestRewriteSetCookiesFailsClosedOnMalformedSession(t *testing.T) {
 	m := NewManager(nil, []byte("k"), "x.test")
 	t.Cleanup(m.Close)
 	// Empty ip: Close's logout skips it rather than dialing a real address.
-	sid, _, _ := m.sessions.create(1, "", "-http-session-=OLD")
+	sid, _, _ := m.sessions.create(idracVendor, 1, "", "-http-session-=OLD")
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Add("Set-Cookie", `-http-session-="abc; Path=/`) // unbalanced quote: unparseable
 	resp.Header.Add("Set-Cookie", `  -http-session-=sp"ace; Path=/`)
 	resp.Header.Add("Set-Cookie", `other="oops; Path=/`) // unparseable, not the session cookie
-	m.rewriteSetCookies(resp, sid)
+	m.rewriteSetCookies(resp, sid, idracVendor)
 
 	got := resp.Header.Values("Set-Cookie")
 	if len(got) != 1 || got[0] != `other="oops; Path=/` {
 		t.Fatalf("want only the non-session cookie passed through, got %q", got)
 	}
-	if s, _ := m.sessions.get(sid); s.idracCookie != "-http-session-=OLD" {
-		t.Fatalf("malformed line must not alter stored cookie: %q", s.idracCookie)
+	if s, _ := m.sessions.get(sid); s.bmcCookie != "-http-session-=OLD" {
+		t.Fatalf("malformed line must not alter stored cookie: %q", s.bmcCookie)
 	}
 }
 
@@ -390,15 +390,15 @@ func TestRewriteSetCookiesCapturesWellFormedSession(t *testing.T) {
 	m := NewManager(nil, []byte("k"), "x.test")
 	t.Cleanup(m.Close)
 	// Empty ip: Close's logout skips it rather than dialing a real address.
-	sid, _, _ := m.sessions.create(1, "", "-http-session-=OLD")
+	sid, _, _ := m.sessions.create(idracVendor, 1, "", "-http-session-=OLD")
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Add("Set-Cookie", "-http-session-=NEW; Path=/; Domain=idrac.test")
-	m.rewriteSetCookies(resp, sid)
+	m.rewriteSetCookies(resp, sid, idracVendor)
 	if got := resp.Header.Values("Set-Cookie"); len(got) != 0 {
 		t.Fatalf("session cookie leaked: %q", got)
 	}
-	if s, _ := m.sessions.get(sid); s.idracCookie != "-http-session-=NEW" {
-		t.Fatalf("session cookie not captured: %q", s.idracCookie)
+	if s, _ := m.sessions.get(sid); s.bmcCookie != "-http-session-=NEW" {
+		t.Fatalf("session cookie not captured: %q", s.bmcCookie)
 	}
 }
 
@@ -410,11 +410,11 @@ func TestRelayIPChangeDropsSessionAndLogsOutOldBMC(t *testing.T) {
 	srv := &model.Server{ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac)}
 	m := NewManager(fakeLookup{1: srv}, []byte("s"), "pi.home.kilar.net")
 	t.Cleanup(m.Close)
-	sid, _, err := m.sessions.create(1, hostport(idrac), "-http-session-="+idracSessionValue)
+	sid, _, err := m.sessions.create(idracVendor, 1, hostport(idrac), "-http-session-="+idracSessionValue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { m.relay(w, r, 1) }))
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { m.relay(w, r, 1, idracVendor) }))
 	t.Cleanup(front.Close)
 
 	srv.IPAddress = "192.0.2.1:443" // operator re-addressed the server
@@ -454,7 +454,7 @@ func TestMaybeInjectAutoLaunchOnlyOnRealDashboard(t *testing.T) {
 	setup := func(t *testing.T) (*Manager, string) {
 		m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
 		t.Cleanup(m.Close)
-		sid, _, _ := m.sessions.create(1, "", "c")
+		sid, _, _ := m.sessions.create(idracVendor, 1, "", "c")
 		m.sessions.setAutoLaunch(sid)
 		return m, sid
 	}
@@ -601,7 +601,7 @@ func TestRelayBlocksCrossSiteWebSocket(t *testing.T) {
 func TestCloseLogsOutSessionsOnce(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
-	if _, _, err := m.sessions.create(1, hostport(idrac), "-http-session-="+idracSessionValue); err != nil {
+	if _, _, err := m.sessions.create(idracVendor, 1, hostport(idrac), "-http-session-="+idracSessionValue); err != nil {
 		t.Fatal(err)
 	}
 	m.Close()

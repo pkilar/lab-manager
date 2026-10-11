@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkilar/lab-manager/internal/bmcproxy"
 	"github.com/pkilar/lab-manager/internal/console"
 	"github.com/pkilar/lab-manager/internal/model"
 	"github.com/pkilar/lab-manager/internal/secret"
@@ -170,6 +171,7 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 			HasCreds:         s.RedfishUser != "" || s.IPMIUser != "",
 			ConsoleHref:      a.consoleTarget(s),
 			ConsoleAutoLogin: a.kvmTarget(s) != "",
+			TerminalHref:     a.terminalTarget(s),
 			HasMAC:           s.MACAddress != "",
 			Status:           s.Status,
 			StatusOn:         s.Status == "On",
@@ -424,17 +426,17 @@ func (a *App) handleAPICheckStatus(w http.ResponseWriter, r *http.Request) {
 
 // ---- console -------------------------------------------------------------
 
-// kvmTarget returns the iDRAC auto-login proxy path for s, or "" when that path
-// does not apply (feature off, wrong vendor, no credentials). Only the iDRAC
-// proxy achieves a real auto-login: Supermicro's cookie auth survives a
-// cross-origin form POST, but the iDRAC SPA needs ST tokens the browser cannot
-// read, so the server-side proxy is the only path that avoids hand-entered
-// credentials.
+// kvmTarget returns the auto-login proxy path for s, or "" when that path does
+// not apply (feature off, a vendor the proxy can't front, no credentials). Only
+// the proxy achieves a real auto-login for iDRAC and PiKVM: Supermicro's cookie
+// auth survives a cross-origin form POST, but the iDRAC SPA needs ST tokens the
+// browser cannot read, and PiKVM's SameSite=Strict auth cookie is never sent on
+// a navigation another site started.
 //
 // Single source of truth for the places that must agree — the button and the
 // /kvm initiator (kvm.go) — or a row renders a link its handler then refuses.
 func (a *App) kvmTarget(s *model.Server) string {
-	if !a.proxy.Enabled() || s.BMCType != model.BMCIDRAC {
+	if !a.proxy.Supports(s.BMCType) {
 		return ""
 	}
 	if s.RedfishUser == "" && s.IPMIUser == "" {
@@ -462,6 +464,21 @@ func (a *App) consoleTarget(s *model.Server) string {
 	// put a credentials popup in front of every console launch. Send Console to
 	// the BMC's own UI and leave credentials to 🔑.
 	return cfg.ConsoleURL
+}
+
+// terminalTarget returns the href of the row's web-terminal button, or "" for
+// vendors without one (only PiKVM has one; the others get the IPMI serial
+// console instead). Through the proxy when it fronts the vendor, so the
+// terminal opens logged in; otherwise the BMC's own URL.
+func (a *App) terminalTarget(s *model.Server) string {
+	cfg := console.LoginConfigFor(s)
+	if cfg == nil || cfg.TerminalURL == "" {
+		return ""
+	}
+	if href := a.kvmTarget(s); href != "" {
+		return href + "?to=" + bmcproxy.TargetTerminal
+	}
+	return cfg.TerminalURL
 }
 
 // handleConsoleManual is the browser-navigable way to reach the credentials

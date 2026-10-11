@@ -1,7 +1,8 @@
-// Package bmcproxy reverse-proxies an iDRAC's web UI under
-// idrac-<id>.<domain>, performing a server-side auto-login so the browser
-// lands in the iDRAC logged in without the iDRAC session token ever reaching
-// the client.
+// Package bmcproxy reverse-proxies a BMC's web UI under
+// <prefix>-<id>.<domain> (idrac-<id> for Dell iDRACs, pikvm-<id> for PiKVMs;
+// the per-vendor differences live in vendor.go), performing a server-side
+// auto-login so the browser lands in the BMC logged in without the BMC session
+// token ever reaching the client.
 package bmcproxy
 
 import (

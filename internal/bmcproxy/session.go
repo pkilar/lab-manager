@@ -12,14 +12,15 @@ import (
 const sessionTTL = 8 * time.Hour
 
 // proxySession is the server-side state behind one opaque bmcproxy cookie. It
-// holds the iDRAC session token to inject upstream — that token is never sent
-// to the browser. ip is retained so the session can be logged out of the iDRAC
-// when it is evicted.
+// holds the BMC session token to inject upstream — that token is never sent
+// to the browser. ip and vendor are retained so the session can be logged out
+// of the right BMC (via vendor.logout) when it is evicted.
 type proxySession struct {
-	serverID    int64
-	ip          string
-	idracCookie string // "-http-session-=..." Cookie header value
-	expiry      time.Time
+	serverID  int64
+	ip        string
+	vendor    *vendor
+	bmcCookie string // "<vendor.sessionCookie>=..." Cookie header value; "" = none needed
+	expiry    time.Time
 	// autoLaunch is a one-shot flag: set at handshake, consumed by the first
 	// dashboard HTML load, which then gets the auto-launch script injected.
 	autoLaunch bool
@@ -36,10 +37,10 @@ func newSessionStore() *sessionStore {
 }
 
 // create stores a new session and returns it, plus any prior sessions for the
-// SAME server (now removed) so the caller can log them out of the iDRAC. This
+// SAME server (now removed) so the caller can log them out of the BMC. This
 // caps iDRAC web sessions at ~one per server, so repeated KVM launches don't
 // exhaust the iDRAC's small web-session table.
-func (s *sessionStore) create(serverID int64, ip, idracCookie string) (id string, displaced []*proxySession, err error) {
+func (s *sessionStore) create(v *vendor, serverID int64, ip, bmcCookie string) (id string, displaced []*proxySession, err error) {
 	id, err = randomID()
 	if err != nil {
 		return "", nil, err
@@ -52,13 +53,13 @@ func (s *sessionStore) create(serverID int64, ip, idracCookie string) (id string
 			delete(s.sessions, oldID)
 		}
 	}
-	s.sessions[id] = &proxySession{serverID: serverID, ip: ip, idracCookie: idracCookie, expiry: s.now().Add(sessionTTL)}
+	s.sessions[id] = &proxySession{vendor: v, serverID: serverID, ip: ip, bmcCookie: bmcCookie, expiry: s.now().Add(sessionTTL)}
 	return id, displaced, nil
 }
 
 // get returns a COPY of the session. Returning the *proxySession would let the
 // caller read fields after the mutex is released, racing updateCookie, which
-// rewrites idracCookie under the lock when the iDRAC rotates it mid-session.
+// rewrites bmcCookie under the lock when the iDRAC rotates it mid-session.
 //
 // An expired entry reports not-found but is left in the map: only gc() hands
 // evicted sessions back for an iDRAC logout, so deleting here would strand the
@@ -108,18 +109,18 @@ func (s *sessionStore) takeAutoLaunch(id string) bool {
 	return true
 }
 
-// updateCookie refreshes the injected iDRAC cookie when the controller rotates
+// updateCookie refreshes the injected BMC cookie when the controller rotates
 // it mid-session (captured from an upstream Set-Cookie).
-func (s *sessionStore) updateCookie(id, idracCookie string) {
+func (s *sessionStore) updateCookie(id, bmcCookie string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sess, ok := s.sessions[id]; ok {
-		sess.idracCookie = idracCookie
+		sess.bmcCookie = bmcCookie
 	}
 }
 
 // remove deletes a session and returns it so the caller can log it out of the
-// iDRAC it was issued by.
+// BMC it was issued by.
 func (s *sessionStore) remove(id string) (*proxySession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/pkilar/lab-manager/internal/model"
 	"github.com/pkilar/lab-manager/internal/secret"
 	"github.com/pkilar/lab-manager/internal/store"
@@ -343,5 +346,288 @@ func TestParseIPMIPowerStatus(t *testing.T) {
 		if got != tc.want || ok != tc.wantOK {
 			t.Errorf("parseIPMIPowerStatus(%q) = %q, %v; want %q, %v", tc.out, got, ok, tc.want, tc.wantOK)
 		}
+	}
+}
+
+type pikvmCall struct{ method, path, action, user, pass string }
+
+// newPiKVM starts a TLS httptest server and a stored PiKVM row pointing at it.
+func newPiKVM(t *testing.T, redfishUser, ipmiUser string, h func(w http.ResponseWriter, r *http.Request)) (*Controller, *model.Server, *[]pikvmCall) {
+	t.Helper()
+	var calls []pikvmCall
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, pikvmCall{r.Method, r.URL.Path, r.URL.Query().Get("action"), r.Header.Get("X-KVMD-User"), r.Header.Get("X-KVMD-Passwd")})
+		h(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c, st := newWoLController(t, nil)
+	s := &model.Server{
+		Name: "pikvm", IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCPiKVM, Status: "Unknown",
+		RedfishUser: redfishUser, RedfishPassword: "rf-pw", IPMIUser: ipmiUser, IPMIPassword: "ipmi-pw",
+	}
+	if err := st.CreateServer(s); err != nil {
+		t.Fatalf("CreateServer: %v", err)
+	}
+	return c, s, &calls
+}
+
+func okJSON(w http.ResponseWriter, _ *http.Request) {
+	_, _ = w.Write([]byte(`{"ok": true, "result": {}}`))
+}
+
+func TestPiKVMSendCommands(t *testing.T) {
+	for _, tc := range []struct{ cmd, action, status string }{
+		{"power on", "on", "On"},
+		{"power off", "off", "Off"},
+		{"power cycle", "reset_hard", "On"},
+		{"reset", "reset_hard", "On"},
+	} {
+		t.Run(tc.cmd, func(t *testing.T) {
+			c, s, calls := newPiKVM(t, "admin", "", okJSON)
+			ok, msg := c.Send(t.Context(), s, tc.cmd)
+			if !ok {
+				t.Fatalf("Send = false (%q)", msg)
+			}
+			want := pikvmCall{http.MethodPost, "/api/atx/power", tc.action, "admin", "rf-pw"}
+			if len(*calls) != 1 || (*calls)[0] != want {
+				t.Fatalf("calls = %+v, want [%+v]", *calls, want)
+			}
+			if s.Status != tc.status {
+				t.Errorf("status = %q, want %q", s.Status, tc.status)
+			}
+			got, err := c.store.GetServer(s.ID)
+			if err != nil || got.Status != tc.status {
+				t.Errorf("persisted status = %q (err %v), want %q", got.Status, err, tc.status)
+			}
+		})
+	}
+}
+
+func TestPiKVMSendErrorJSON(t *testing.T) {
+	c, s, _ := newPiKVM(t, "admin", "", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"ok": false, "result": {"error": "AtxIsBusyError", "error_msg": "Performing another ATX operation"}}`))
+	})
+	ok, msg := c.Send(t.Context(), s, "power on")
+	if ok || !strings.Contains(msg, "AtxIsBusyError") || !strings.Contains(msg, "another ATX operation") {
+		t.Errorf("Send = %v, %q; want failure naming the kvmd error", ok, msg)
+	}
+	if strings.Contains(msg, "rf-pw") {
+		t.Error("message leaks the password")
+	}
+	if s.Status != "Unknown" {
+		t.Errorf("status = %q, want untouched", s.Status)
+	}
+	c2, s2, _ := newPiKVM(t, "admin", "", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
+	if ok, msg := c2.Send(t.Context(), s2, "power off"); ok || !strings.Contains(msg, "HTTP 403") {
+		t.Errorf("Send = %v, %q; want HTTP 403 failure", ok, msg)
+	}
+}
+
+func TestPiKVMNeverHitsRedfish(t *testing.T) {
+	c, s, calls := newPiKVM(t, "admin", "", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/redfish/") {
+			t.Errorf("PiKVM request hit Redfish path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"ok": true, "result": {"enabled": true, "leds": {"power": true}}}`))
+	})
+	c.Send(t.Context(), s, "power on")
+	c.CheckStatus(t.Context(), s)
+	for _, call := range *calls {
+		if strings.Contains(call.path, "redfish") {
+			t.Errorf("hit %s", call.path)
+		}
+	}
+	if len(*calls) != 2 {
+		t.Errorf("calls = %d, want 2", len(*calls))
+	}
+}
+
+func TestPiKVMIPMICredsAndNoCreds(t *testing.T) {
+	c, s, calls := newPiKVM(t, "", "ipmiuser", okJSON)
+	if ok, msg := c.Send(t.Context(), s, "power on"); !ok {
+		t.Fatalf("Send = false (%q)", msg)
+	}
+	if got := (*calls)[0]; got.user != "ipmiuser" || got.pass != "ipmi-pw" {
+		t.Errorf("headers = %q/%q, want IPMI creds", got.user, got.pass)
+	}
+
+	c, s, calls = newPiKVM(t, "", "", okJSON)
+	if ok, _ := c.Send(t.Context(), s, "power on"); ok || len(*calls) != 0 {
+		t.Errorf("no-credential PiKVM must fail without any request (calls %d)", len(*calls))
+	}
+	if got := c.CheckStatus(t.Context(), s); got != "Unknown" || len(*calls) != 0 {
+		t.Errorf("CheckStatus = %q with %d calls, want cached and no request", got, len(*calls))
+	}
+}
+
+func TestPiKVMSendUnknownCommand(t *testing.T) {
+	c, s, calls := newPiKVM(t, "admin", "", okJSON)
+	if ok, msg := c.Send(t.Context(), s, "bogus"); ok || msg != "Command not implemented" || len(*calls) != 0 {
+		t.Errorf("Send = %v, %q, calls %d", ok, msg, len(*calls))
+	}
+}
+
+func TestPiKVMCheckStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		code       int
+		want       string
+	}{
+		{"on", `{"ok":true,"result":{"enabled":true,"busy":false,"leds":{"power":true,"hdd":false}}}`, 200, "On"},
+		{"forbidden", `{"ok":false,"result":{"error":"ForbiddenError"}}`, 403, "Unknown"},
+		{"garbage", `not json`, 200, "Unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, s, calls := newPiKVM(t, "admin", "", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			if got := c.CheckStatus(t.Context(), s); got != tc.want {
+				t.Errorf("CheckStatus = %q, want %q", got, tc.want)
+			}
+			want := pikvmCall{http.MethodGet, "/api/atx", "", "admin", "rf-pw"}
+			if len(*calls) != 1 || (*calls)[0] != want {
+				t.Errorf("calls = %+v, want [%+v]", *calls, want)
+			}
+			got, err := c.store.GetServer(s.ID)
+			if err != nil || got.Status != tc.want {
+				t.Errorf("persisted = %q (err %v), want %q", got.Status, err, tc.want)
+			}
+		})
+	}
+}
+
+// pikvmVideoFixture is a PiKVM fake serving /api/atx and the kvmd event
+// WebSocket. wsEvents are written as text frames after the upgrade, then the
+// connection is held open until the client leaves.
+type pikvmVideoFixture struct {
+	mu                sync.Mutex
+	atxHits, wsHits   int
+	atxCode           int
+	atxEnabled, atxOn bool
+	wsEvents          []string
+	wsRefuse          bool
+}
+
+func newPiKVMVideo(t *testing.T, f *pikvmVideoFixture) (*Controller, *model.Server) {
+	t.Helper()
+	old := pikvmVideoWindow
+	pikvmVideoWindow = 300 * time.Millisecond
+	t.Cleanup(func() { pikvmVideoWindow = old })
+	up := websocket.Upgrader{}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authOK := r.Header.Get("X-KVMD-User") == "admin" && r.Header.Get("X-KVMD-Passwd") == "rf-pw"
+		switch r.URL.Path {
+		case "/api/atx":
+			f.mu.Lock()
+			f.atxHits++
+			code, en, on := f.atxCode, f.atxEnabled, f.atxOn
+			f.mu.Unlock()
+			if code == 0 {
+				code = 200
+			}
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"enabled":` + boolStr(en) + `,"leds":{"power":` + boolStr(on) + `}}}`))
+		case "/api/ws":
+			f.mu.Lock()
+			f.wsHits++
+			refuse := f.wsRefuse
+			evs := f.wsEvents
+			f.mu.Unlock()
+			if r.URL.Query().Get("stream") != "1" {
+				t.Errorf("ws query = %q, want stream=1", r.URL.RawQuery)
+			}
+			if !authOK || refuse {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			conn, err := up.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			for _, e := range evs {
+				if conn.WriteMessage(websocket.TextMessage, []byte(e)) != nil {
+					return
+				}
+			}
+			for { // hold open until the client closes
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, st := newWoLController(t, nil)
+	s := &model.Server{
+		Name: "pikvm", IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCPiKVM, Status: "Unknown",
+		RedfishUser: "admin", RedfishPassword: "rf-pw",
+	}
+	if err := st.CreateServer(s); err != nil {
+		t.Fatalf("CreateServer: %v", err)
+	}
+	return c, s
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+func streamerEv(source string) string {
+	return `{"event_type":"streamer","event":{"streamer":{"source":` + source + `}}}`
+}
+
+func TestPiKVMVideoStatus(t *testing.T) {
+	const offline = `{"online":false,"resolution":{"width":640,"height":480}}`
+	const online = `{"online":true,"resolution":{"width":1280,"height":720}}`
+	for _, tc := range []struct {
+		name      string
+		f         *pikvmVideoFixture
+		want      string
+		persisted string
+		wantWS    int
+		maxDur    time.Duration // 0 = no bound
+	}{
+		{"led on short-circuits", &pikvmVideoFixture{atxEnabled: true, atxOn: true}, "On", "On", 0, 0},
+		{"led off, video comes online", &pikvmVideoFixture{atxEnabled: true, wsEvents: []string{
+			streamerEv("null"), streamerEv(offline), streamerEv(online)}}, "On", "On", 1, 250 * time.Millisecond},
+		{"led off, stays offline", &pikvmVideoFixture{atxEnabled: true, wsEvents: []string{
+			streamerEv("null"), streamerEv(offline)}}, "Off", "Off", 1, 0},
+		{"led off, capture never starts", &pikvmVideoFixture{atxEnabled: true, wsEvents: []string{
+			streamerEv("null"), streamerEv("null")}}, "Unknown", "Unknown", 1, 0},
+		{"atx disabled, video online", &pikvmVideoFixture{wsEvents: []string{streamerEv(online)}}, "On", "On", 1, 0},
+		{"ws refuses auth", &pikvmVideoFixture{atxEnabled: true, wsRefuse: true}, "Unknown", "Unknown", 1, 0},
+		{"partial event shape and legacy name", &pikvmVideoFixture{atxEnabled: true, wsEvents: []string{
+			`{"event_type":"info","event":{"streamer":{"source":{"online":true}}}}`,
+			`{"event_type":"streamer_state","event":{"streamer":{"source":{"online":true}}}}`}}, "On", "On", 1, 0},
+		{"atx forbidden", &pikvmVideoFixture{atxCode: 403, wsEvents: []string{streamerEv(online)}}, "Unknown", "Unknown", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, s := newPiKVMVideo(t, tc.f)
+			start := time.Now()
+			if got := c.CheckStatus(t.Context(), s); got != tc.want {
+				t.Errorf("CheckStatus = %q, want %q", got, tc.want)
+			}
+			if tc.maxDur > 0 && time.Since(start) > tc.maxDur {
+				t.Errorf("took %v, want under %v (must return before the window elapses)", time.Since(start), tc.maxDur)
+			}
+			tc.f.mu.Lock()
+			ws, atx := tc.f.wsHits, tc.f.atxHits
+			tc.f.mu.Unlock()
+			if ws != tc.wantWS || atx != 1 {
+				t.Errorf("wsHits = %d (want %d), atxHits = %d (want 1)", ws, tc.wantWS, atx)
+			}
+			got, err := c.store.GetServer(s.ID)
+			if err != nil || got.Status != tc.persisted {
+				t.Errorf("persisted = %q (err %v), want %q", got.Status, err, tc.persisted)
+			}
+		})
 	}
 }

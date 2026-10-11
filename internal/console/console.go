@@ -106,6 +106,9 @@ type BMCLoginConfig struct {
 	LoginURL          string
 	ConsoleURL        string
 	SupportsAutoLogin bool
+	// TerminalURL is the BMC's own web terminal, for vendors that have one
+	// (PiKVM's ttyd); empty otherwise.
+	TerminalURL string
 }
 
 // LoginConfigFor returns per-vendor login/console URLs, or nil when the server
@@ -136,6 +139,18 @@ func LoginConfigFor(s *model.Server) *BMCLoginConfig {
 			LoginURL:          "https://" + ip + "/json/login_session",
 			ConsoleURL:        "https://" + ip + "/html5/html5client.html",
 			SupportsAutoLogin: false,
+		}
+	case model.BMCPiKVM:
+		// No browser-side auto-login: kvmd's auth_token cookie is
+		// SameSite=Strict, so a cookie set by a cross-site form POST is never
+		// sent on the navigation into /kvm/ that follows. Auto-login exists
+		// only through the bmcproxy reverse proxy (which keeps its own copy of
+		// these paths, as this package does not depend on bmcproxy).
+		return &BMCLoginConfig{
+			LoginURL:          "https://" + ip + "/api/auth/login",
+			ConsoleURL:        "https://" + ip + "/kvm/",
+			SupportsAutoLogin: false,
+			TerminalURL:       "https://" + ip + "/extras/webterm/ttyd/",
 		}
 	default: // generic / unknown
 		return &BMCLoginConfig{

@@ -65,7 +65,7 @@ func TestHandshakeLogsInAndSetsSession(t *testing.T) {
 		t.Fatal("no bmcproxy cookie set")
 	}
 	sess, ok := m.sessions.get(sid)
-	if !ok || sess.serverID != 1 || sess.idracCookie != "-http-session-="+idracSessionValue {
+	if !ok || sess.serverID != 1 || sess.bmcCookie != "-http-session-="+idracSessionValue {
 		t.Fatalf("session not stored correctly: %+v ok=%v", sess, ok)
 	}
 	// The handshake flags the session so the dashboard it redirects to gets the
@@ -94,7 +94,7 @@ func TestLogoutIDRACReleasesSession(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{}, []byte("s"), "pi.home.kilar.net")
 	t.Cleanup(m.Close)
-	m.logoutIDRAC(hostport(idrac), "-http-session-="+idracSessionValue)
+	idracLogout(hostport(idrac), "-http-session-="+idracSessionValue)
 	if idrac.logoutCount() != 1 {
 		t.Fatalf("logoutIDRAC should call /data/logout once, got %d", idrac.logoutCount())
 	}

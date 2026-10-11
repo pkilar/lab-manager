@@ -142,6 +142,10 @@ type serverRow struct {
 	// ConsoleAutoLogin distinguishes those two link cases for the tooltip, so a
 	// plain link to the BMC does not claim to log the user in.
 	ConsoleAutoLogin bool
+	// TerminalHref is the BMC's own web terminal (PiKVM), shown in place of the
+	// IPMI serial console button. Empty for every other vendor. See
+	// App.terminalTarget.
+	TerminalHref     string
 	HasMAC           bool
 	Status           string
 	StatusOn         bool

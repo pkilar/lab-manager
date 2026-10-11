@@ -2,7 +2,6 @@ package bmcproxy
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"html"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +20,7 @@ import (
 )
 
 // proxyCookieName is the opaque session cookie the browser holds on the proxy
-// subdomain. It maps to server-side state (the injected iDRAC cookie).
+// subdomain. It maps to server-side state (the injected BMC cookie).
 const proxyCookieName = "bmcproxy"
 
 // ServerLookup fetches a server by id; *store.Store satisfies it.
@@ -30,7 +28,8 @@ type ServerLookup interface {
 	GetServer(id int64) (*model.Server, error)
 }
 
-// Manager serves the iDRAC reverse proxy for idrac-<id>.<domain> hosts.
+// Manager serves the BMC reverse proxy for <vendor>-<id>.<domain> hosts
+// (iDRAC and PiKVM today).
 type Manager struct {
 	lookup   ServerLookup
 	secret   []byte
@@ -61,14 +60,14 @@ func (m *Manager) sessionGC() {
 		case <-t.C:
 		}
 		for _, sess := range m.sessions.gc() {
-			m.logoutIDRAC(sess.ip, sess.idracCookie)
+			sess.vendor.logout(sess.ip, sess.bmcCookie)
 		}
 	}
 }
 
 // Close stops the session GC and logs every live proxy session out of its
-// iDRAC, returning once all logouts finish (each is bounded by logoutIDRAC's own
-// 10s timeout). It is meant for process shutdown: without it the sessions would
+// BMC (via the vendor each was created with), returning once all logouts finish
+// (each is bounded by the vendor logout's own 10s timeout). It is meant for process shutdown: without it the sessions would
 // sit in the BMCs' small web-session tables until the BMC times them out.
 // Idempotent and nil-safe.
 func (m *Manager) Close() {
@@ -79,55 +78,47 @@ func (m *Manager) Close() {
 		close(m.done)
 		var wg sync.WaitGroup
 		for _, sess := range m.sessions.drain() {
-			wg.Go(func() { m.logoutIDRAC(sess.ip, sess.idracCookie) })
+			wg.Go(func() { sess.vendor.logout(sess.ip, sess.bmcCookie) })
 		}
 		wg.Wait()
 	})
 }
 
-// logoutIDRAC releases an iDRAC web session (-http-session-) so repeated KVM
-// launches don't exhaust the iDRAC's small web-session table. Best-effort: runs
-// on its own background deadline so it completes even when the originating
-// request is gone.
-func (m *Manager) logoutIDRAC(ip, idracCookie string) {
-	if ip == "" || idracCookie == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+ip+"/data/logout", nil)
-	if err != nil {
-		return
-	}
-	req.Header.Set("Cookie", idracCookie)
-	resp, err := loginClient.Do(req)
-	if err != nil {
-		return
-	}
-	_ = resp.Body.Close()
-}
-
 // Enabled reports whether the proxy feature is configured.
 func (m *Manager) Enabled() bool { return m != nil && m.domain != "" }
 
-var hostIDPattern = regexp.MustCompile(`^idrac-(\d+)\.(.+)$`)
-
-// HostServerID returns the iDRAC server id when host is a proxy host for this
-// manager's domain.
-func (m *Manager) HostServerID(host string) (int64, bool) {
+// resolveHost returns the server id and vendor when host is a proxy host for
+// this manager's domain.
+func (m *Manager) resolveHost(host string) (int64, *vendor, bool) {
 	if !m.Enabled() {
-		return 0, false
+		return 0, nil, false
 	}
-	host = stripPort(host)
-	mt := hostIDPattern.FindStringSubmatch(host)
-	if mt == nil || mt[2] != m.domain {
-		return 0, false
+	mt := hostIDPattern.FindStringSubmatch(stripPort(host))
+	if mt == nil || mt[3] != m.domain {
+		return 0, nil, false
 	}
-	id, err := strconv.ParseInt(mt[1], 10, 64)
+	id, err := strconv.ParseInt(mt[2], 10, 64)
 	if err != nil {
-		return 0, false
+		return 0, nil, false
 	}
-	return id, true
+	for _, v := range vendors {
+		if v.hostPrefix == mt[1] {
+			return id, v, true
+		}
+	}
+	return 0, nil, false
+}
+
+// HostServerID returns the server id when host is a proxy host (any known
+// vendor prefix) for this manager's domain.
+func (m *Manager) HostServerID(host string) (int64, bool) {
+	id, _, ok := m.resolveHost(host)
+	return id, ok
+}
+
+// Supports reports whether the proxy is enabled and has a vendor for bmcType.
+func (m *Manager) Supports(bmcType string) bool {
+	return m.Enabled() && vendorFor(bmcType) != nil
 }
 
 func stripPort(host string) string {
@@ -146,9 +137,22 @@ func (m *Manager) MintToken(serverID int64) string { return mintToken(m.secret, 
 // the HTTPS Swarm deploy that is unchanged; it additionally makes the flow
 // reachable over plain HTTP in development, where the whole path was previously
 // impossible to exercise.
-func (m *Manager) AuthURL(scheme, hostPort string, serverID int64, token string) string {
-	host := fmt.Sprintf("idrac-%d.%s", serverID, m.domain)
-	return fmt.Sprintf("%s://%s/__labmgr/auth?token=%s", scheme, withPortOf(hostPort, host), token)
+//
+// bmcType picks the host prefix; an unknown type falls back to the iDRAC prefix
+// (callers should gate on Supports). target, when non-empty, is appended as the
+// url-escaped `to` parameter selecting a vendor landing page (e.g.
+// TargetTerminal); with "" the URL is byte-identical to the pre-PiKVM output.
+func (m *Manager) AuthURL(scheme, hostPort, bmcType string, serverID int64, token, target string) string {
+	v := vendorFor(bmcType)
+	if v == nil {
+		v = idracVendor
+	}
+	host := fmt.Sprintf("%s-%d.%s", v.hostPrefix, serverID, m.domain)
+	u := fmt.Sprintf("%s://%s/__labmgr/auth?token=%s", scheme, withPortOf(hostPort, host), token)
+	if target != "" {
+		u += "&to=" + url.QueryEscape(target)
+	}
+	return u
 }
 
 // appBaseURL is the main app's external URL (used to bounce expired sessions
@@ -167,34 +171,37 @@ func withPortOf(src, host string) string {
 }
 
 // bmcConsolePort is the separate TLS listener the iDRAC serves its HTML5
-// virtual console from. The console SPA builds its URL from
+// virtual console from (vendor.consolePort). The console SPA builds its URL from
 // window.location.host, so it arrives here as idrac-<id>.<domain>:5900 rather
 // than pointing at the BMC directly — which means it can be proxied, but only
 // if the request is forwarded to the BMC's 5900 instead of 443.
 const bmcConsolePort = "5900"
 
-// upstreamHost picks the BMC address to forward to, honouring the virtual
-// console's separate port. Only bmcConsolePort is passed through: any other
-// inbound port is the app's own listener (":5000" in development) and must not
-// be forwarded to the BMC.
-func upstreamHost(ip, inboundHost string) string {
-	if _, port, err := net.SplitHostPort(inboundHost); err == nil && port == bmcConsolePort {
-		return net.JoinHostPort(stripPort(ip), bmcConsolePort)
+// upstreamHost picks the BMC address to forward to, honouring the vendor's
+// separate console port (if any). Only v.consolePort is passed through: any
+// other inbound port is the app's own listener (":5000" in development) and
+// must not be forwarded to the BMC.
+func upstreamHost(v *vendor, ip, inboundHost string) string {
+	if v.consolePort == "" {
+		return ip
+	}
+	if _, port, err := net.SplitHostPort(inboundHost); err == nil && port == v.consolePort {
+		return net.JoinHostPort(stripPort(ip), v.consolePort)
 	}
 	return ip
 }
 
-// relay proxies an authenticated request to the iDRAC, injecting the
+// relay proxies an authenticated request to the BMC, injecting the
 // server-side session cookie. A single ReverseProxy handles both plain HTTP and
 // the KVM WebSocket (it natively tunnels Upgrade requests).
-func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
+func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64, v *vendor) {
 	if crossSiteWrite(r) {
 		http.Error(w, "cross-site request refused", http.StatusForbidden)
 		return
 	}
 	sess, sid, ok := m.sessionFor(r)
 	if !ok || sess.serverID != id {
-		m.bounceToInitiator(w, r, id)
+		m.bounceToInitiator(w, r, id, v)
 		return
 	}
 	s, err := m.lookup.GetServer(id)
@@ -202,21 +209,30 @@ func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64) {
 		http.Error(w, "server not found", http.StatusNotFound)
 		return
 	}
-	if s.IPAddress != sess.ip {
-		// The server's address changed since login: the session cookie belongs
-		// to the old BMC and must not be replayed to whatever is at the new
-		// address. Release it where it was issued and force a fresh handshake.
+	if s.IPAddress != sess.ip || sess.vendor != v || s.BMCType != v.bmcType {
+		// The server's address (or BMC type) changed since login: the session
+		// cookie belongs to the old BMC and must not be replayed to whatever is
+		// at the new address, nor across vendors. Release it where it was
+		// issued and force a fresh handshake.
 		if removed, ok := m.sessions.remove(sid); ok {
-			go m.logoutIDRAC(removed.ip, removed.idracCookie)
+			go removed.vendor.logout(removed.ip, removed.bmcCookie)
 		}
-		m.bounceToInitiator(w, r, id)
+		m.bounceToInitiator(w, r, id, v)
 		return
 	}
-	m.serveHTTP(w, r, sid, upstreamHost(s.IPAddress, r.Host), sess.idracCookie)
+	m.serveHTTP(w, r, v, sid, upstreamHost(v, s.IPAddress, r.Host), sess.bmcCookie)
 }
 
-func (m *Manager) bounceToInitiator(w http.ResponseWriter, r *http.Request, id int64) {
-	http.Redirect(w, r, m.appBaseURL(r)+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
+// bounceToInitiator sends the browser back through the login-gated initiator.
+// For a vendor with landing targets, a request under a non-default target's
+// path (e.g. the PiKVM terminal) carries ?to=<name> so the fresh handshake
+// returns to the same page.
+func (m *Manager) bounceToInitiator(w http.ResponseWriter, r *http.Request, id int64, v *vendor) {
+	dest := m.appBaseURL(r) + "/server/" + strconv.FormatInt(id, 10) + "/kvm"
+	if name := v.targetName(r.URL.Path); name != "" {
+		dest += "?to=" + url.QueryEscape(name)
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
 }
 
 // crossSiteWrite reports whether r is a state-changing request or a WebSocket
@@ -262,7 +278,7 @@ func (m *Manager) sessionFor(r *http.Request) (proxySession, string, bool) {
 	return sess, c.Value, true
 }
 
-func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idracCookie string) {
+func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, v *vendor, sid, ip, bmcCookie string) {
 	rp := &httputil.ReverseProxy{
 		Transport: proxyTransport,
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -275,16 +291,22 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 			pr.Out.Header.Set("Origin", "https://"+ip)
 			pr.Out.Header.Set("Referer", "https://"+ip+"/")
 			// Rebuild Cookie: drop our proxy cookie and any client-supplied
-			// session, then inject the server-held iDRAC session.
+			// session, then inject the server-held BMC session (if any).
 			var keep []string
 			for _, c := range pr.Out.Cookies() {
-				if c.Name == proxyCookieName || c.Name == idracSessionCookie {
+				if c.Name == proxyCookieName || c.Name == v.sessionCookie {
 					continue
 				}
 				keep = append(keep, c.Name+"="+c.Value)
 			}
-			keep = append(keep, idracCookie)
-			pr.Out.Header.Set("Cookie", strings.Join(keep, "; "))
+			if bmcCookie != "" {
+				keep = append(keep, bmcCookie)
+			}
+			if len(keep) > 0 {
+				pr.Out.Header.Set("Cookie", strings.Join(keep, "; "))
+			} else {
+				pr.Out.Header.Del("Cookie")
+			}
 			// Don't leak the browser's IP to the BMC: deliberately no
 			// pr.SetXForwarded(). Rewrite already stripped the inbound
 			// X-Forwarded-*/Forwarded headers, but Traefik's X-Real-Ip
@@ -298,12 +320,15 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, sid, ip, idr
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rewriteLocation(resp, ip, r.Host, proxyScheme(r))
-			m.rewriteSetCookies(resp, sid)
+			m.rewriteSetCookies(resp, sid, v)
+			if !v.autoLaunch {
+				return nil
+			}
 			return m.maybeInjectAutoLaunch(resp, sid)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			slog.Error("bmcproxy upstream", "ip", ip, "err", err)
-			http.Error(w, "iDRAC unreachable", http.StatusBadGateway)
+			slog.Error("bmcproxy upstream", "vendor", v.name, "ip", ip, "err", err)
+			http.Error(w, v.name+" unreachable", http.StatusBadGateway)
 		},
 	}
 	rp.ServeHTTP(w, r)
@@ -459,10 +484,10 @@ func rewriteLocation(resp *http.Response, ip, proxyHost, scheme string) {
 	}
 }
 
-// rewriteSetCookies captures the iDRAC session cookie into server-side state
-// (and strips it from the browser-facing response); other cookies are
+// rewriteSetCookies captures the vendor's BMC session cookie into server-side
+// state (and strips it from the browser-facing response); other cookies are
 // host-scoped to the subdomain by dropping their Domain attribute.
-func (m *Manager) rewriteSetCookies(resp *http.Response, sid string) {
+func (m *Manager) rewriteSetCookies(resp *http.Response, sid string, v *vendor) {
 	lines := resp.Header.Values("Set-Cookie")
 	if len(lines) == 0 {
 		return
@@ -472,19 +497,19 @@ func (m *Manager) rewriteSetCookies(resp *http.Response, sid string) {
 		c, err := http.ParseSetCookie(line)
 		if err != nil {
 			// Fail closed for the session cookie only: an unparseable line
-			// named -http-session- would otherwise hand the real iDRAC token
+			// named like the session cookie would otherwise hand the real token
 			// to the browser (and never reach the store). Other unparseable
-			// cookies keep passing through verbatim -- the iDRAC UI cookies
+			// cookies keep passing through verbatim -- the BMC UI cookies
 			// that work today must not start vanishing.
 			name, _, _ := strings.Cut(line, "=")
-			if strings.TrimSpace(name) == idracSessionCookie {
-				slog.Warn("bmcproxy dropped unparseable iDRAC session Set-Cookie", "cookie", idracSessionCookie, "err", err)
+			if strings.TrimSpace(name) == v.sessionCookie {
+				slog.Warn("bmcproxy dropped unparseable BMC session Set-Cookie", "vendor", v.name, "cookie", v.sessionCookie, "err", err)
 				continue
 			}
 			out = append(out, line)
 			continue
 		}
-		if c.Name == idracSessionCookie {
+		if c.Name == v.sessionCookie {
 			m.sessions.updateCookie(sid, c.Name+"="+c.Value)
 			continue
 		}
@@ -499,60 +524,82 @@ func (m *Manager) rewriteSetCookies(resp *http.Response, sid string) {
 
 // Handler serves one request on a proxy host: the auth handshake, or a relay.
 func (m *Manager) Handler(w http.ResponseWriter, r *http.Request) {
-	id, ok := m.HostServerID(r.Host)
+	id, v, ok := m.resolveHost(r.Host)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 	if r.URL.Path == "/__labmgr/auth" {
-		m.handleAuth(w, r, id)
+		m.handleAuth(w, r, id, v)
 		return
 	}
-	m.relay(w, r, id)
+	m.relay(w, r, id, v)
 }
 
-// handleAuth verifies the handshake token, logs into the iDRAC server-side,
+// handleAuth verifies the handshake token, logs into the BMC server-side,
 // stores the session, sets the opaque proxy cookie, and redirects the browser
-// to the SPA forward URL.
-func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
-	if !verifyToken(m.secret, r.URL.Query().Get("token"), id) {
-		// Bounce through the login-gated initiator to re-mint.
-		http.Redirect(w, r, m.appBaseURL(r)+"/server/"+strconv.FormatInt(id, 10)+"/kvm", http.StatusFound)
+// to the vendor's landing page. A vendor with reuseSession skips the login when
+// the browser already holds a valid session for the same server.
+func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64, v *vendor) {
+	q := r.URL.Query()
+	if !verifyToken(m.secret, q.Get("token"), id) {
+		// Bounce through the login-gated initiator to re-mint, keeping a valid
+		// landing target so an expired terminal handshake returns to it.
+		dest := m.appBaseURL(r) + "/server/" + strconv.FormatInt(id, 10) + "/kvm"
+		if to := q.Get("to"); to != "" {
+			if _, ok := v.targets[to]; ok {
+				dest += "?to=" + url.QueryEscape(to)
+			}
+		}
+		http.Redirect(w, r, dest, http.StatusFound)
 		return
 	}
 	s, err := m.lookup.GetServer(id)
-	if err != nil || s.BMCType != model.BMCIDRAC {
+	if err != nil || s.BMCType != v.bmcType {
 		http.NotFound(w, r)
 		return
+	}
+	if v.sessionValid != nil {
+		// A second tab (KVM vs terminal) on the same host: a fresh login would
+		// log out the session the first tab is using and the BMC would drop it.
+		// A session the BMC no longer honours falls through to a fresh login,
+		// which displaces (and logs out) the dead one.
+		if sess, _, ok := m.sessionFor(r); ok && sess.serverID == id && sess.ip == s.IPAddress && sess.vendor == v &&
+			v.sessionValid(r.Context(), s.IPAddress, sess.bmcCookie) {
+			http.Redirect(w, r, v.targetPath(q.Get("to")), http.StatusFound)
+			return
+		}
 	}
 	user, pass := s.RedfishUser, s.RedfishPassword
 	if user == "" {
 		user, pass = s.IPMIUser, s.IPMIPassword
 	}
 	if user == "" {
-		m.errorPage(w, r, id, "No credentials configured for this server")
+		m.errorPage(w, r, id, v, "No credentials configured for this server")
 		return
 	}
-	cookie, forwardURL, err := idracLogin(r.Context(), s.IPAddress, user, pass)
+	cookie, forwardURL, err := v.login(r.Context(), s.IPAddress, user, pass)
 	if err != nil {
-		slog.Error("bmcproxy iDRAC login", "server_id", id, "err", err)
-		m.errorPage(w, r, id, err.Error())
+		slog.Error("bmcproxy login", "vendor", v.name, "server_id", id, "err", err)
+		m.errorPage(w, r, id, v, err.Error())
 		return
 	}
-	sid, displaced, err := m.sessions.create(id, s.IPAddress, cookie)
+	sid, displaced, err := m.sessions.create(v, id, s.IPAddress, cookie)
 	if err != nil {
 		slog.Error("bmcproxy session create", "server_id", id, "err", err)
-		m.errorPage(w, r, id, "internal error")
+		m.errorPage(w, r, id, v, "internal error")
 		return
 	}
-	// Log out any prior iDRAC session for this server so repeated launches
-	// don't pile up on the iDRAC's small web-session table.
+	// Log out any prior BMC session for this server (via its own vendor) so
+	// repeated launches don't pile up on the BMC's small web-session table.
 	for _, d := range displaced {
-		go m.logoutIDRAC(d.ip, d.idracCookie)
+		go d.vendor.logout(d.ip, d.bmcCookie)
 	}
-	// Flag this session so the dashboard we're about to land on gets the
-	// auto-launch script injected — it clicks the console open for the operator.
-	m.sessions.setAutoLaunch(sid)
+	if v.autoLaunch {
+		// Flag this session so the dashboard we're about to land on gets the
+		// auto-launch script injected — it clicks the console open for the operator.
+		m.sessions.setAutoLaunch(sid)
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     proxyCookieName,
 		Value:    sid,
@@ -564,10 +611,14 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64) {
 		Secure:   proxyScheme(r) == "https",
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, safeForwardPath(forwardURL), http.StatusFound)
+	dest := safeForwardPath(forwardURL)
+	if v.targets != nil {
+		dest = v.targetPath(q.Get("to"))
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
 }
 
-// safeForwardPath keeps only the path+query of the iDRAC-supplied forward URL,
+// safeForwardPath keeps only the path+query of the BMC-supplied forward URL,
 // dropping any scheme/host so a malicious or compromised iDRAC cannot
 // open-redirect the browser off-site (e.g. "//evil.com/x").
 func safeForwardPath(forwardURL string) string {
@@ -588,15 +639,15 @@ func safeForwardPath(forwardURL string) string {
 // errorPage renders a proxy failure. serverID > 0 adds a link to that server's
 // credentials page: auto-login is now the primary Console action, so a failure
 // here would otherwise dead-end with no way to reach the manual fallback.
-func (m *Manager) errorPage(w http.ResponseWriter, r *http.Request, serverID int64, msg string) {
+func (m *Manager) errorPage(w http.ResponseWriter, r *http.Request, serverID int64, v *vendor, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusBadGateway)
 	base := m.appBaseURL(r)
 	fmt.Fprintf(w,
-		`<!doctype html><meta charset="utf-8"><title>iDRAC proxy</title>`+
+		`<!doctype html><meta charset="utf-8"><title>%s proxy</title>`+
 			`<body style="font-family:sans-serif;background:#1a1a2e;color:#fff;padding:40px">`+
-			`<h2 style="color:#ef4444">Could not open iDRAC</h2><p>%s</p>`,
-		html.EscapeString(msg))
+			`<h2 style="color:#ef4444">Could not open %s</h2><p>%s</p>`,
+		html.EscapeString(v.name), html.EscapeString(v.name), html.EscapeString(msg))
 	if serverID > 0 {
 		fmt.Fprintf(w,
 			`<p><a style="color:#60a5fa" href="%s/server/%d/console/manual">`+

@@ -9,6 +9,7 @@ const (
 	BMCIDRAC      = "idrac"
 	BMCSupermicro = "supermicro"
 	BMCILO        = "ilo"
+	BMCPiKVM      = "pikvm"
 	BMCGeneric    = "generic"
 )
 
@@ -20,6 +21,7 @@ var BMCTypes = []struct {
 	{BMCIDRAC, "Dell iDRAC"},
 	{BMCSupermicro, "Supermicro IPMI"},
 	{BMCILO, "HPE iLO"},
+	{BMCPiKVM, "PiKVM"},
 	{BMCGeneric, "Generic/Other"},
 }
 

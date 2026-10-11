@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/pkilar/lab-manager/internal/model"
 )
 
 func newTestManager(t *testing.T) *Manager {
@@ -46,7 +48,7 @@ func TestEnabledAndURLs(t *testing.T) {
 	tok := m.MintToken(3)
 
 	// Production: HTTPS, no port — must be byte-identical to the old behaviour.
-	if got := m.AuthURL("https", "lab.pi.home.kilar.net", 3, tok); got != "https://idrac-3.pi.home.kilar.net/__labmgr/auth?token="+tok {
+	if got := m.AuthURL("https", "lab.pi.home.kilar.net", model.BMCIDRAC, 3, tok, ""); got != "https://idrac-3.pi.home.kilar.net/__labmgr/auth?token="+tok {
 		t.Fatalf("AuthURL = %q", got)
 	}
 	httpsReq := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -58,7 +60,7 @@ func TestEnabledAndURLs(t *testing.T) {
 
 	// Development: plain HTTP on a non-default port. The scheme and port must
 	// carry through, or the handshake redirects off the dev server entirely.
-	if got := m.AuthURL("http", "127.0.0.1:5000", 3, tok); got != "http://idrac-3.pi.home.kilar.net:5000/__labmgr/auth?token="+tok {
+	if got := m.AuthURL("http", "127.0.0.1:5000", model.BMCIDRAC, 3, tok, ""); got != "http://idrac-3.pi.home.kilar.net:5000/__labmgr/auth?token="+tok {
 		t.Fatalf("dev AuthURL = %q", got)
 	}
 	devReq := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -84,7 +86,7 @@ func TestUpstreamHostRoutesConsolePort(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := upstreamHost(tc.ip, tc.inbound); got != tc.want {
+			if got := upstreamHost(idracVendor, tc.ip, tc.inbound); got != tc.want {
 				t.Fatalf("upstreamHost(%q, %q) = %q, want %q", tc.ip, tc.inbound, got, tc.want)
 			}
 		})

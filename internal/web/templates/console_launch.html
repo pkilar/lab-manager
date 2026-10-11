@@ -172,6 +172,7 @@
             {{if eq .BMCType "idrac"}}Dell iDRAC
             {{else if eq .BMCType "supermicro"}}Supermicro IPMI
             {{else if eq .BMCType "ilo"}}HPE iLO
+            {{else if eq .BMCType "pikvm"}}PiKVM
             {{else}}Management Console
             {{end}}
         </div>

@@ -22,8 +22,10 @@
                         <option value="idrac" {{if eq .Server.BMCType "idrac"}}selected{{end}}>Dell iDRAC</option>
                         <option value="supermicro" {{if eq .Server.BMCType "supermicro"}}selected{{end}}>Supermicro IPMI</option>
                         <option value="ilo" {{if eq .Server.BMCType "ilo"}}selected{{end}}>HPE iLO</option>
+                        <option value="pikvm" {{if eq .Server.BMCType "pikvm"}}selected{{end}}>PiKVM</option>
                     </select>
-                    <small style="color: #666;">Select BMC type for automatic console login</small>
+                    <small style="color: #666;">Select BMC type for automatic console login. For PiKVM, enter its web
+                        login as the Redfish username/password; power control uses its ATX API.</small>
                 </div>
                 <div class="form-group">
                     <label for="redfish_user">Redfish Username</label>
