@@ -4,10 +4,12 @@ package store
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkilar/lab-manager/internal/model"
@@ -23,6 +25,9 @@ var ErrNotFound = errors.New("not found")
 type Store struct {
 	db     *sql.DB
 	cipher *secret.Fernet
+
+	warnMu sync.Mutex
+	warned map[string]struct{} // "serverID/column" already warned about
 }
 
 const serverColumns = `id, name, ip_address, bmc_type, redfish_user, redfish_password, ipmi_user, ipmi_password, mac_address, status, last_updated, notes, sol_instance`
@@ -136,14 +141,51 @@ func (st *Store) addColumnIfMissing(table, column, definition string) error {
 
 // ---- credential helpers --------------------------------------------------
 
-func (st *Store) decryptCredential(ciphertext string) string {
+// warnUndecryptable is the logging seam for looksLikeFernet misses; tests swap it.
+var warnUndecryptable = func(serverID int64, column string) {
+	slog.Warn("stored credential looks encrypted but does not decrypt; wrong or regenerated encryption key?",
+		"server_id", serverID, "column", column)
+}
+
+// looksLikeFernet reports whether v is shaped like a Fernet token: urlsafe
+// base64 of at least version+timestamp+IV+one block+HMAC (73 bytes) starting
+// with the 0x80 version byte.
+func looksLikeFernet(v string) bool {
+	raw, err := base64.URLEncoding.DecodeString(v)
+	return err == nil && len(raw) >= 73 && raw[0] == 0x80
+}
+
+// warnOnce logs at most one warning per (server, column) per process.
+func (st *Store) warnOnce(serverID int64, column string) {
+	key := fmt.Sprintf("%d/%s", serverID, column)
+	st.warnMu.Lock()
+	_, seen := st.warned[key]
+	if !seen {
+		if st.warned == nil {
+			st.warned = make(map[string]struct{})
+		}
+		st.warned[key] = struct{}{}
+	}
+	st.warnMu.Unlock()
+	if !seen {
+		warnUndecryptable(serverID, column)
+	}
+}
+
+func (st *Store) decryptCredential(serverID int64, column, ciphertext string) string {
 	if ciphertext == "" {
 		return ""
 	}
 	pt, err := st.cipher.Decrypt(ciphertext)
 	if err != nil {
 		// Not a valid Fernet token — treat as a legacy plaintext credential
-		// stored before encryption was introduced (return it unchanged).
+		// stored before encryption was introduced (return it unchanged). A value
+		// that is shaped like a token, though, means the key was lost or
+		// swapped: flag it (never the value) so the cause of BMC auth failures
+		// is visible.
+		if looksLikeFernet(ciphertext) {
+			st.warnOnce(serverID, column)
+		}
 		return ciphertext
 	}
 	return string(pt)
@@ -181,9 +223,9 @@ func (st *Store) scanServer(sc scanner) (*model.Server, error) {
 		s.BMCType = model.BMCGeneric
 	}
 	s.RedfishUser = rfUser.String
-	s.RedfishPassword = st.decryptCredential(rfPass.String)
+	s.RedfishPassword = st.decryptCredential(s.ID, "redfish_password", rfPass.String)
 	s.IPMIUser = ipmiUser.String
-	s.IPMIPassword = st.decryptCredential(ipmiPass.String)
+	s.IPMIPassword = st.decryptCredential(s.ID, "ipmi_password", ipmiPass.String)
 	s.MACAddress = mac.String
 	s.Status = status.String
 	s.Notes = notes.String

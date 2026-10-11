@@ -27,7 +27,9 @@ func testServer(t *testing.T) (*httptest.Server, *http.Client, *store.Store) {
 }
 
 // testServerApp is testServer plus the App, for tests that control its clock.
-func testServerApp(t *testing.T) (*httptest.Server, *http.Client, *store.Store, *App) {
+// Each opt runs before the server starts, so settings a handler reads need no
+// synchronization.
+func testServerApp(t *testing.T, opts ...func(*App)) (*httptest.Server, *http.Client, *store.Store, *App) {
 	t.Helper()
 	dir := t.TempDir()
 	keyB64, err := secret.LoadEncryptionKey(dir)
@@ -50,6 +52,9 @@ func testServerApp(t *testing.T) (*httptest.Server, *http.Client, *store.Store, 
 	app, err := New(st, []byte("integration-secret"), false, "")
 	if err != nil {
 		t.Fatalf("web.New: %v", err)
+	}
+	for _, opt := range opts {
+		opt(app)
 	}
 	srv := httptest.NewServer(app.Handler())
 	t.Cleanup(srv.Close)

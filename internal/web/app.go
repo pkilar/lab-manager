@@ -25,6 +25,7 @@ type App struct {
 	wolEnabled bool
 	now        func() time.Time // injectable clock for session expiry and login throttling
 	loginLimit *loginLimiter
+	solTimings solTimings // SOL WebSocket keepalive; tests shrink it
 }
 
 // New builds the web application: it parses the embedded templates and
@@ -45,6 +46,7 @@ func New(st *store.Store, secretKey []byte, wolEnabled bool, bmcProxyDomain stri
 		wolEnabled: wolEnabled,
 		now:        time.Now,
 		loginLimit: newLoginLimiter(),
+		solTimings: defaultSOLTimings,
 	}, nil
 }
 

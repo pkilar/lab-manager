@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,6 +98,9 @@ func (execRunner) Run(ctx context.Context, args, env []string, stdin io.Reader, 
 // Manager runs SOL sessions. Construct once with NewManager and share it.
 type Manager struct {
 	run runner
+
+	mu   sync.Mutex
+	live map[*Session]struct{} // lazily created so a bare &Manager{run: r} works
 }
 
 func NewManager() *Manager { return &Manager{run: execRunner{}} }
@@ -126,14 +130,16 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 	ctx, cancel := context.WithCancel(ctx)
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	env := append(os.Environ(), "IPMI_PASSWORD="+pass)
+	env := childEnv(pass)
 
 	sess := &Session{
 		Stdin: inW, Output: outR,
 		cancel: cancel, stdinW: inW, outR: outR, done: make(chan struct{}),
 	}
 
+	m.track(sess)
 	go func() {
+		defer m.untrack(sess)
 		// Clear a possibly-leaked prior payload (single-session per BMC).
 		_ = m.run.Run(ctx, deactivateArgs(s.IPAddress, user, instance), env, nil, io.Discard)
 		// Run the console until ctx is cancelled or ipmitool exits. The exit
@@ -153,6 +159,54 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 	}()
 
 	return sess, nil
+}
+
+// childEnv is the environment handed to ipmitool: the app's own, minus its
+// secrets (LAB_MANAGER_SECRET_KEY / _ENCRYPTION_KEY, ...) and any inherited
+// IPMI_PASSWORD, plus the one password this session needs.
+func childEnv(pass string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "LAB_MANAGER_") || strings.HasPrefix(kv, "IPMI_PASSWORD=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "IPMI_PASSWORD="+pass)
+}
+
+func (m *Manager) track(s *Session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.live == nil {
+		m.live = make(map[*Session]struct{})
+	}
+	m.live[s] = struct{}{}
+}
+
+func (m *Manager) untrack(s *Session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.live, s)
+}
+
+// CloseAll closes every live session concurrently and returns once all have
+// finished their cleanup deactivate (each bounded by its 10s timeout). It is
+// meant for process shutdown so every BMC SOL payload is released rather than
+// left pinned until the BMC times it out.
+func (m *Manager) CloseAll() {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.live))
+	for s := range m.live {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, s := range sessions {
+		wg.Go(func() { _ = s.Close() })
+	}
+	wg.Wait()
 }
 
 // Close cancels the session, releases the BMC payload, and waits for cleanup.

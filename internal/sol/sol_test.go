@@ -317,3 +317,96 @@ func TestExecSessionCloseWithUnreadOutput(t *testing.T) {
 		t.Fatalf("deactivations = %d, want 2 (pre-activate clear + cleanup)", n)
 	}
 }
+
+func TestChildEnvFiltersSecretsAndSetsPasswordOnce(t *testing.T) {
+	t.Setenv("LAB_MANAGER_SECRET_KEY", "topsecret")
+	t.Setenv("LAB_MANAGER_ENCRYPTION_KEY", "alsosecret")
+	t.Setenv("IPMI_PASSWORD", "stale")
+	t.Setenv("LAB_TEST_KEEP", "yes")
+
+	env := childEnv("calvin")
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "LAB_MANAGER_") {
+			t.Fatalf("app secret leaked into child env: %q", strings.SplitN(kv, "=", 2)[0])
+		}
+		if strings.HasPrefix(kv, "IPMI_PASSWORD=") {
+			n++
+		}
+	}
+	if n != 1 || !slices.Contains(env, "IPMI_PASSWORD=calvin") {
+		t.Fatalf("want exactly one IPMI_PASSWORD=calvin, got %d", n)
+	}
+	if !slices.Contains(env, "LAB_TEST_KEEP=yes") {
+		t.Fatal("unrelated variables must be preserved")
+	}
+}
+
+func (m *Manager) liveCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.live)
+}
+
+func TestCloseAllClosesEverySessionAndDeactivates(t *testing.T) {
+	fr := &fakeRunner{}
+	m := &Manager{run: fr}
+	srv := &model.Server{IPAddress: "10.0.0.5", RedfishUser: "root", RedfishPassword: "calvin"}
+	var sessions []*Session
+	for range 2 {
+		s, err := m.Start(t.Context(), srv)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		sessions = append(sessions, s)
+	}
+	if got := m.liveCount(); got != 2 {
+		t.Fatalf("live = %d, want 2", got)
+	}
+	// Each session runs a pre-clear and a cleanup deactivate = 2 apiece.
+	m.CloseAll()
+	for i, s := range sessions {
+		select {
+		case <-s.done:
+		default:
+			t.Fatalf("session %d not finished after CloseAll", i)
+		}
+	}
+	if got := fr.deactivations.Load(); got < 4 {
+		t.Fatalf("deactivations = %d, want >= 4 (pre-clear + cleanup per session)", got)
+	}
+	waitFor(t, func() bool { return m.liveCount() == 0 })
+}
+
+func TestCloseAllWithNoSessionsReturnsImmediately(t *testing.T) {
+	m := &Manager{run: &fakeRunner{}}
+	done := make(chan struct{})
+	go func() { m.CloseAll(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("CloseAll blocked with no sessions")
+	}
+}
+
+func TestEndedSessionIsNoLongerTracked(t *testing.T) {
+	m := &Manager{run: &fakeRunner{}}
+	srv := &model.Server{IPAddress: "10.0.0.5", RedfishUser: "root", RedfishPassword: "calvin"}
+	s, err := m.Start(t.Context(), srv)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	_ = s.Close()
+	waitFor(t, func() bool { return m.liveCount() == 0 })
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

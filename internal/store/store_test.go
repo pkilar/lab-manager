@@ -34,14 +34,14 @@ func TestDecryptCredentialLegacyPlaintextFallback(t *testing.T) {
 	st := &Store{cipher: testFernet(t)}
 	// The shipped DB stores plaintext credentials like "calvin"; they are not
 	// valid Fernet tokens and must be returned verbatim.
-	if got := st.decryptCredential("calvin"); got != "calvin" {
+	if got := st.decryptCredential(1, "c", "calvin"); got != "calvin" {
 		t.Fatalf("legacy plaintext = %q, want calvin", got)
 	}
-	if got := st.decryptCredential(""); got != "" {
+	if got := st.decryptCredential(1, "c", ""); got != "" {
 		t.Fatalf("empty = %q, want empty", got)
 	}
 	tok, _ := st.cipher.Encrypt([]byte("encrypted"))
-	if got := st.decryptCredential(tok); got != "encrypted" {
+	if got := st.decryptCredential(1, "c", tok); got != "encrypted" {
 		t.Fatalf("fernet round-trip via store = %q, want encrypted", got)
 	}
 }
@@ -203,4 +203,53 @@ func openStoreAtPath(t *testing.T, path string) *Store {
 		t.Fatalf("Open(%s): %v", path, err)
 	}
 	return st
+}
+
+func TestUndecryptableFernetTokenWarnsOncePerColumn(t *testing.T) {
+	var warns []string
+	old := warnUndecryptable
+	warnUndecryptable = func(id int64, col string) { warns = append(warns, col) }
+	t.Cleanup(func() { warnUndecryptable = old })
+
+	otherKey := "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	other, err := secret.NewFernet([]byte(otherKey))
+	if err != nil {
+		t.Fatalf("NewFernet: %v", err)
+	}
+	tok, err := other.Encrypt([]byte("calvin"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	st := &Store{cipher: testFernet(t)}
+
+	for range 3 {
+		if got := st.decryptCredential(7, "redfish_password", tok); got != tok {
+			t.Fatalf("fallback must return the raw value, got %q", got)
+		}
+	}
+	if len(warns) != 1 {
+		t.Fatalf("warnings after repeats = %v, want exactly 1", warns)
+	}
+	st.decryptCredential(7, "ipmi_password", tok)
+	st.decryptCredential(8, "redfish_password", tok)
+	if len(warns) != 3 {
+		t.Fatalf("distinct (server,column) pairs should each warn once, got %v", warns)
+	}
+}
+
+func TestLegacyPlaintextDoesNotWarn(t *testing.T) {
+	var n int
+	old := warnUndecryptable
+	warnUndecryptable = func(int64, string) { n++ }
+	t.Cleanup(func() { warnUndecryptable = old })
+
+	st := &Store{cipher: testFernet(t)}
+	for _, v := range []string{"calvin", "p@ss word", strings.Repeat("A", 120)} {
+		if got := st.decryptCredential(1, "redfish_password", v); got != v {
+			t.Fatalf("plaintext %q altered to %q", v, got)
+		}
+	}
+	if n != 0 {
+		t.Fatalf("plaintext triggered %d warnings", n)
+	}
 }
