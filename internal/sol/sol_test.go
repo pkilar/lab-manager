@@ -1,13 +1,18 @@
 package sol
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pkilar/lab-manager/internal/model"
 )
@@ -219,5 +224,96 @@ func TestStartFailsWithoutCreds(t *testing.T) {
 	m := &Manager{run: &fakeRunner{}}
 	if _, err := m.Start(t.Context(), &model.Server{IPAddress: "10.0.0.5"}); err == nil {
 		t.Fatal("expected error when no credentials are configured")
+	}
+}
+
+// fakeIPMITool puts a stub `ipmitool` first on PATH so the real execRunner can
+// be exercised without a BMC. `sol deactivate` appends a line to the returned
+// log; anything else (i.e. `sol activate`) runs the given shell snippet.
+func fakeIPMITool(t *testing.T, activate string) (deactivateLog string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("stub ipmitool needs a POSIX shell")
+	}
+	dir := t.TempDir()
+	deactivateLog = filepath.Join(dir, "deactivations")
+	script := "#!/bin/sh\n" +
+		"case \" $* \" in *\" deactivate \"*) echo x >> '" + deactivateLog + "'; exit 0 ;; esac\n" +
+		activate + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "ipmitool"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return deactivateLog
+}
+
+func countDeactivations(t *testing.T, log string) int {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("read deactivate log: %v", err)
+	}
+	return bytes.Count(b, []byte("\n"))
+}
+
+// When ipmitool exits by itself (the BMC dropped the session, or the user typed
+// `~.`), the session must end on its own: Output reaches EOF and the payload is
+// released, without waiting for another keystroke to unblock stdin.
+func TestExecSessionEndsWhenIPMIToolExits(t *testing.T) {
+	log := fakeIPMITool(t, "echo bye; exit 0")
+	m := NewManager()
+	sess, err := m.Start(t.Context(), &model.Server{IPAddress: "10.0.0.5", IPMIUser: "root", IPMIPassword: "calvin"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	got := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(sess.Output)
+		got <- b
+	}()
+	select {
+	case b := <-got:
+		if !strings.Contains(string(b), "bye") {
+			t.Errorf("Output = %q, want it to contain ipmitool's output", b)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Output never reached EOF after ipmitool exited")
+	}
+	// EOF is delivered only after the cleanup deactivate, so both the
+	// pre-activate clear and the cleanup have run by now.
+	if n := countDeactivations(t, log); n != 2 {
+		t.Fatalf("deactivations = %d, want 2 (pre-activate clear + cleanup)", n)
+	}
+}
+
+// A caller that stops reading Output (its WebSocket write failed) and then
+// closes the session must not hang: Close has to unblock ipmitool's pending
+// output write so Wait returns and the cleanup deactivate runs.
+func TestExecSessionCloseWithUnreadOutput(t *testing.T) {
+	log := fakeIPMITool(t, "while :; do echo AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; done")
+	m := NewManager()
+	sess, err := m.Start(t.Context(), &model.Server{IPAddress: "10.0.0.5", IPMIUser: "root", IPMIPassword: "calvin"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Prove the console is streaming, then stop reading.
+	if _, err := io.ReadFull(sess.Output, make([]byte, 1)); err != nil {
+		t.Fatalf("read first output byte: %v", err)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		_ = sess.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close hung with unread Output")
+	}
+	if n := countDeactivations(t, log); n != 2 {
+		t.Fatalf("deactivations = %d, want 2 (pre-activate clear + cleanup)", n)
 	}
 }

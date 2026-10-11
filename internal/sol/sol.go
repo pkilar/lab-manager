@@ -70,10 +70,28 @@ type execRunner struct{}
 func (execRunner) Run(ctx context.Context, args, env []string, stdin io.Reader, stdout io.Writer) error {
 	cmd := exec.CommandContext(ctx, "ipmitool", args...)
 	cmd.Env = env
-	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout // surface ipmitool errors inline in the terminal
-	return cmd.Run()
+	if stdin == nil {
+		return cmd.Run()
+	}
+	// Feed stdin from our own goroutine rather than cmd.Stdin: for a reader that
+	// isn't an *os.File, Wait also waits for os/exec's copy goroutine, which sits
+	// in stdin.Read until the next keystroke. An ipmitool that exited on its own
+	// (BMC dropped the session, `~.`) would then go unnoticed until the user
+	// typed. This goroutine ends when the caller closes stdin.
+	w, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		_, _ = io.Copy(w, stdin)
+		_ = w.Close()
+	}()
+	return cmd.Wait()
 }
 
 // Manager runs SOL sessions. Construct once with NewManager and share it.
@@ -91,6 +109,7 @@ type Session struct {
 
 	cancel    context.CancelFunc
 	stdinW    *io.PipeWriter
+	outR      *io.PipeReader
 	closeOnce sync.Once
 	done      chan struct{}
 }
@@ -111,7 +130,7 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 
 	sess := &Session{
 		Stdin: inW, Output: outR,
-		cancel: cancel, stdinW: inW, done: make(chan struct{}),
+		cancel: cancel, stdinW: inW, outR: outR, done: make(chan struct{}),
 	}
 
 	go func() {
@@ -142,6 +161,11 @@ func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
 		_ = s.stdinW.Close() // EOF to the runner's stdin (kills the echo/copy)
+		// Fail any write still pending on the output pipe. Without this, a
+		// caller that stopped reading Output (its WebSocket write failed) leaves
+		// os/exec's stdout copy blocked, so Wait never returns, the cleanup
+		// deactivate never runs, and this Close blocks forever.
+		_ = s.outR.CloseWithError(io.ErrClosedPipe)
 	})
 	<-s.done
 	return nil

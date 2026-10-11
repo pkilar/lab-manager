@@ -96,7 +96,11 @@ func (a *App) handleSOLSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		n, rerr := sess.Output.Read(buf)
 		if n > 0 {
-			if werr := conn.WriteMessage(websocket.TextMessage, buf[:n]); werr != nil {
+			// Binary, not Text: serial output is arbitrary bytes (CP437 BIOS
+			// screens, a UTF-8 rune split across reads), and browsers fail the
+			// connection on a text frame that isn't valid UTF-8. The page sets
+			// binaryType='arraybuffer' and xterm decodes UTF-8 across writes.
+			if werr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
 				return
 			}
 		}
