@@ -154,7 +154,7 @@ Go `html/template`, embedded from `internal/web/templates/` via `//go:embed`. Th
 
 ## Protocol Implementation Notes
 
-**Redfish**: TLS certificate verification disabled (BMCs ship self-signed certs), 30s timeout; power actions map to `{"ResetType": "On|GracefulShutdown|ForceRestart"}`.
+**Redfish**: TLS certificate verification disabled (BMCs ship self-signed certs), 30s timeout, redirects **not** followed (a 307/308 would replay the login JSON with the password to whatever host it names; a BMC API never legitimately redirects). The iDRAC session DELETE takes only the *path* of the `Location` header and always targets the BMC, so the `X-Auth-Token` can't be sent elsewhere; power actions map to `{"ResetType": "On|GracefulShutdown|ForceRestart"}`.
 
 **IPMI**: requires the `ipmitool` binary (present in the Docker image). The password is passed via `-E` + the `IPMI_PASSWORD` env var (power, status, and SOL alike), so it never appears in `ps` / `/proc/<pid>/cmdline`.
 

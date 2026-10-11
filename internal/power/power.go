@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +36,8 @@ var bmcHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
 	},
+	// A BMC API call never legitimately redirects; following one would replay credentials elsewhere.
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
 // Controller sends power commands and persists the resulting status.
@@ -137,9 +140,14 @@ func ipmiArgs(s *model.Server, cmd ...string) []string {
 	return append([]string{"-I", "lan", "-H", s.IPAddress, "-U", s.IPMIUser, "-E"}, cmd...)
 }
 
-// ipmiEnv is the child environment carrying the IPMI password for -E.
+// ipmiEnv is the child environment carrying the IPMI password for -E. The
+// app's own LAB_MANAGER_* settings (session secret etc.) and any inherited
+// IPMI_PASSWORD are stripped so ipmitool never sees them.
 func ipmiEnv(s *model.Server) []string {
-	return append(os.Environ(), "IPMI_PASSWORD="+s.IPMIPassword)
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "LAB_MANAGER_") || strings.HasPrefix(kv, "IPMI_PASSWORD=")
+	})
+	return append(env, "IPMI_PASSWORD="+s.IPMIPassword)
 }
 
 // ipmiCommand runs `ipmitool ... <command>` over LAN.
@@ -321,16 +329,30 @@ func (c *Controller) checkStatusIPMI(ctx context.Context, s *model.Server) strin
 	if err := cmd.Run(); err != nil {
 		return s.Status
 	}
-	low := strings.ToLower(stdout.String())
-	switch {
-	case strings.Contains(low, "on"):
-		c.touchStatus(s, "On")
-		return "On"
-	case strings.Contains(low, "off"):
-		c.touchStatus(s, "Off")
-		return "Off"
-	default:
+	status, ok := parseIPMIPowerStatus(stdout.String())
+	if !ok {
 		return s.Status
+	}
+	c.touchStatus(s, status)
+	return status
+}
+
+// parseIPMIPowerStatus maps `ipmitool power status` output ("Chassis Power is
+// on|off") to "On"/"Off". It anchors on that phrase: a bare substring test for
+// "on" also matches words like "session" in an ipmitool error message.
+func parseIPMIPowerStatus(out string) (string, bool) {
+	_, rest, ok := strings.Cut(strings.ToLower(out), "chassis power is ")
+	if !ok {
+		return "", false
+	}
+	state, _, _ := strings.Cut(strings.TrimSpace(rest), "\n")
+	switch strings.TrimSpace(state) {
+	case "on":
+		return "On", true
+	case "off":
+		return "Off", true
+	default:
+		return "", false
 	}
 }
 

@@ -38,17 +38,20 @@ var bmcHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
 	},
+	// A BMC API call never legitimately redirects; following one would replay credentials elsewhere.
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
 // Manager issues and verifies console access tokens and runs the iDRAC
 // credential pre-flight.
 type Manager struct {
 	secretKey []byte
+	now       func() time.Time // injectable clock so tests can cross the token expiry
 }
 
 // NewManager builds a console Manager keyed by the application secret.
 func NewManager(secretKey []byte) *Manager {
-	return &Manager{secretKey: secretKey}
+	return &Manager{secretKey: secretKey, now: time.Now}
 }
 
 // CredsFor returns the (username, password) the console/protocol code should
@@ -66,7 +69,7 @@ func CredsFor(s *model.Server) (string, string) {
 // ---- console access tokens ----------------------------------------------
 
 func (m *Manager) GenerateToken(serverID, userID int64) string {
-	ts := time.Now().Unix()
+	ts := m.now().Unix()
 	sig := hmacHex(m.secretKey, fmt.Sprintf("%d:%d:%d", serverID, userID, ts))
 	return base64.URLEncoding.EncodeToString(fmt.Appendf(nil, "%d:%s", ts, sig))
 }
@@ -84,7 +87,7 @@ func (m *Manager) VerifyToken(token string, serverID, userID int64) bool {
 	if err != nil {
 		return false
 	}
-	if time.Now().Unix()-ts > TokenValiditySeconds {
+	if m.now().Unix()-ts > TokenValiditySeconds {
 		return false
 	}
 	expected := hmacHex(m.secretKey, fmt.Sprintf("%d:%d:%d", serverID, userID, ts))
@@ -270,10 +273,14 @@ func idracCleanupSession(ip, token, location string) {
 	if token == "" || location == "" {
 		return
 	}
-	deleteURL := location
-	if strings.HasPrefix(location, "/") {
-		deleteURL = "https://" + ip + location
+	// Only the path of Location is honoured: the DELETE (carrying the session
+	// token) is always sent to the BMC itself, never to a host the reply names.
+	loc, err := url.Parse(location)
+	if err != nil || loc.Path == "" || loc.Path == "/" {
+		slog.Warn("iDRAC session cleanup skipped: unusable Location", "ip", ip)
+		return
 	}
+	deleteURL := (&url.URL{Scheme: "https", Host: ip, Path: loc.Path, RawPath: loc.RawPath, RawQuery: loc.RawQuery}).String()
 	// Cleanup must run even when the originating request was cancelled, so it
 	// gets its own short-lived background deadline rather than the request
 	// context — otherwise a cancelled launch would leak the iDRAC session.
