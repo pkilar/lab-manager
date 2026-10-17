@@ -64,6 +64,13 @@ services:
       # Deploy with the values in the Portainer stack environment, or export
       # them first — do NOT `source .env`, which holds the LOCAL dev values.
       - LAB_MANAGER_STRICT_CONFIG=true
+      # MCP endpoint for AI agents (https://lab.pi.home.kilar.net/mcp). Empty
+      # disables it (/mcp 404s); the strict guard above does not require it.
+      # When set it must be at least 32 characters (`openssl rand -hex 32`) or
+      # the app refuses to start. It grants power control over every server, so
+      # keep it in the Portainer stack environment next to the session key.
+      # See README "MCP server for AI agents".
+      - LAB_MANAGER_MCP_TOKEN=${LAB_MANAGER_MCP_TOKEN:-}
 
     volumes:
       # SQLite DB + encryption key. A named volume keeps the data on the pinned

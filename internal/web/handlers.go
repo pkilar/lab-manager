@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/pkilar/lab-manager/internal/bmcproxy"
@@ -361,27 +360,13 @@ func (a *App) handleWakeOnLAN(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-// checkAllConcurrency bounds the parallel BMC status checks of /check-all-servers.
-const checkAllConcurrency = 8
-
 func (a *App) handleCheckAllServers(w http.ResponseWriter, r *http.Request) {
 	servers, err := a.store.AllServers()
 	if err != nil {
 		a.serverError(w, r, err)
 		return
 	}
-	// Each check can block for the full BMC timeout on an unreachable host, so
-	// run them concurrently (bounded) rather than holding the request N x timeout.
-	sem := make(chan struct{}, checkAllConcurrency)
-	var wg sync.WaitGroup
-	for _, s := range servers {
-		sem <- struct{}{}
-		wg.Go(func() {
-			defer func() { <-sem }()
-			a.power.CheckStatus(r.Context(), s)
-		})
-	}
-	wg.Wait()
+	a.power.CheckAll(r.Context(), servers)
 	requestSession(r).flash("success", fmt.Sprintf("Successfully updated status for all %d servers", len(servers)))
 	http.Redirect(w, r, "/", http.StatusFound)
 }

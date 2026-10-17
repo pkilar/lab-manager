@@ -35,7 +35,7 @@ func proxyTestServer(t *testing.T) (*httptest.Server, *http.Client) {
 	if err := st.InitDefaultUser(); err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(st, []byte("integration-secret"), false, "pi.home.kilar.net")
+	app, err := New(st, []byte("integration-secret"), false, "pi.home.kilar.net", "")
 	if err != nil {
 		t.Fatal(err)
 	}

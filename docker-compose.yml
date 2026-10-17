@@ -24,6 +24,10 @@ services:
       # real base domain plus the Traefik idrac-* router in docker-stack.yml.
       #   LAB_MANAGER_BMC_PROXY_DOMAIN=localhost docker compose up -d --build
       - LAB_MANAGER_BMC_PROXY_DOMAIN=${LAB_MANAGER_BMC_PROXY_DOMAIN:-}
+      # MCP endpoint for AI agents (http://<host>:5000/mcp). Empty disables it.
+      # When set it must be at least 32 characters (openssl rand -hex 32) or the
+      # app refuses to start. See README "MCP server for AI agents".
+      - LAB_MANAGER_MCP_TOKEN=${LAB_MANAGER_MCP_TOKEN:-}
       # The app runs unprivileged; the entrypoint re-owns ./instance to this
       # uid:gid on start. Default to the usual first host user so the bind-mounted
       # DB and key stay readable from the host (e.g. `sqlite3 instance/servers.db`).

@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -177,21 +179,28 @@ func countPrefix(env []string, p string) (n int) {
 	return n
 }
 
-// redfishFixture starts a fake TLS BMC running handler and returns a controller,
-// a stored server whose IP is the fake's host:port, and the store.
-func redfishFixture(t *testing.T, handler http.HandlerFunc) (*Controller, *model.Server, *store.Store) {
+// addRedfishBMC starts a fake TLS BMC running handler and stores a server named
+// name in st whose IP is the fake's host:port.
+func addRedfishBMC(t *testing.T, st *store.Store, name string, handler http.HandlerFunc) *model.Server {
 	t.Helper()
 	srv := httptest.NewTLSServer(handler)
 	t.Cleanup(srv.Close)
-	c, st := newWoLController(t, nil)
 	s := &model.Server{
-		Name: "rf", IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCIDRAC,
+		Name: name, IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCIDRAC,
 		RedfishUser: "root", RedfishPassword: "calvin", Status: "Unknown",
 	}
 	if err := st.CreateServer(s); err != nil {
 		t.Fatalf("CreateServer: %v", err)
 	}
-	return c, s, st
+	return s
+}
+
+// redfishFixture starts a fake TLS BMC running handler and returns a controller,
+// a stored server whose IP is the fake's host:port, and the store.
+func redfishFixture(t *testing.T, handler http.HandlerFunc) (*Controller, *model.Server, *store.Store) {
+	t.Helper()
+	c, st := newWoLController(t, nil)
+	return c, addRedfishBMC(t, st, "rf", handler), st
 }
 
 func TestRedfishCommandResetTypes(t *testing.T) {
@@ -629,5 +638,181 @@ func TestPiKVMVideoStatus(t *testing.T) {
 				t.Errorf("persisted = %q (err %v), want %q", got.Status, err, tc.persisted)
 			}
 		})
+	}
+}
+
+// TestSendIPMICommandMapping runs Send through a stub ipmitool (first on PATH,
+// as in the sol tests) that echoes its argv, so the command mapping is checked
+// without a BMC. Unmapped commands are refused before ipmitool runs.
+func TestSendIPMICommandMapping(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub ipmitool needs a POSIX shell")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ipmitool"), []byte("#!/bin/sh\necho \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c, st := newWoLController(t, nil)
+	newIPMIServer := func() *model.Server {
+		s := &model.Server{Name: "ipmi", IPAddress: "192.0.2.1", BMCType: model.BMCGeneric, IPMIUser: "admin", IPMIPassword: "pw", Status: "Unknown"}
+		if err := st.CreateServer(s); err != nil {
+			t.Fatalf("CreateServer: %v", err)
+		}
+		return s
+	}
+
+	for _, tc := range []struct{ command, ipmi, status string }{
+		{"power on", "power on", "On"},
+		{"power off", "power off", "Off"},
+		{"reset", "power reset", "On"},
+		{"power cycle", "power cycle", "On"},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			s := newIPMIServer()
+			ok, msg := c.Send(t.Context(), s, tc.command)
+			want := strings.Join(ipmiArgs(s, strings.Fields(tc.ipmi)...), " ") + "\n"
+			if !ok || msg != want {
+				t.Errorf("Send = %v, %q; want true, %q", ok, msg, want)
+			}
+			persisted, err := st.GetServer(s.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Status != tc.status || persisted.Status != tc.status {
+				t.Errorf("status mem=%q db=%q, want %q", s.Status, persisted.Status, tc.status)
+			}
+		})
+	}
+	for _, cmd := range []string{"bogus", ""} {
+		s := newIPMIServer()
+		if ok, msg := c.Send(t.Context(), s, cmd); ok || msg != "Invalid command" {
+			t.Errorf("Send(%q) = %v, %q; want false, %q", cmd, ok, msg, "Invalid command")
+		}
+		if s.Status != "Unknown" {
+			t.Errorf("Send(%q) changed status to %q", cmd, s.Status)
+		}
+	}
+}
+
+// TestSendWithoutBMC pins what Send and CheckStatus do for servers with no BMC
+// to talk to (a MAC address only, or nothing at all): the missing-credential
+// messages, Wake-on-LAN's power-on-only rule and its WOL_ENABLED gate, and the
+// cached status. The WoL send is stubbed, so nothing here touches the network.
+func TestSendWithoutBMC(t *testing.T) {
+	const (
+		mac     = "aa:bb:cc:dd:ee:ff"
+		wolOnly = "No authentication credentials configured (Wake-on-LAN only supports power on)"
+	)
+	c, st := newWoLController(t, func([]byte, string, int) error { return nil })
+	for _, tc := range []struct {
+		name, mac, command string
+		wolDisabled        bool
+		wantOK             bool
+		wantMsg            string
+	}{
+		{"no creds, power on", "", "power on", false, false, "No authentication credentials or MAC address configured"},
+		{"no creds, power off", "", "power off", false, false, wolOnly},
+		{"no creds, unknown command", "", "bogus", false, false, wolOnly},
+		{"mac only, power off", mac, "power off", false, false, wolOnly},
+		{"mac only, power cycle", mac, "power cycle", false, false, wolOnly},
+		{"mac only, reset", mac, "reset", false, false, wolOnly},
+		{"mac only, power on", mac, "power on", false, true, "Wake-on-LAN packets sent to " + mac + " on ports 7 and 9 (check logs for details)"},
+		{"mac only, power on, WoL disabled", mac, "power on", true, false, "Wake-on-LAN is disabled. Set WOL_ENABLED=true to enable it (see README)."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c.wolEnabled = !tc.wolDisabled
+			s := &model.Server{Name: "x", IPAddress: "192.0.2.20", MACAddress: tc.mac, BMCType: model.BMCGeneric, Status: "Off"}
+			if err := st.CreateServer(s); err != nil {
+				t.Fatalf("CreateServer: %v", err)
+			}
+			// Neither can read a power state, so CheckStatus hands back the cache.
+			if got := c.CheckStatus(t.Context(), s); got != "Off" || !s.LastUpdated.IsZero() {
+				t.Errorf("CheckStatus = %q (touched: %v), want cached Off untouched", got, !s.LastUpdated.IsZero())
+			}
+			ok, msg := c.Send(t.Context(), s, tc.command)
+			if ok != tc.wantOK || msg != tc.wantMsg {
+				t.Errorf("Send(%q) = %v, %q; want %v, %q", tc.command, ok, msg, tc.wantOK, tc.wantMsg)
+			}
+			// Only a sent magic packet changes the (optimistic) status.
+			wantStatus := "Off"
+			if tc.wantOK {
+				wantStatus = "On"
+			}
+			if s.Status != wantStatus {
+				t.Errorf("status = %q, want %q", s.Status, wantStatus)
+			}
+		})
+	}
+}
+
+func TestProtocolFor(t *testing.T) {
+	const mac = "aa:bb:cc:dd:ee:ff"
+	for _, tc := range []struct {
+		name string
+		s    model.Server
+		want Protocol // spelled as strings so the names themselves are pinned
+	}{
+		{"pikvm beats redfish creds", model.Server{BMCType: model.BMCPiKVM, RedfishUser: "admin", IPMIUser: "ipmi", MACAddress: mac}, "pikvm"},
+		{"pikvm without creds never falls through", model.Server{BMCType: model.BMCPiKVM, MACAddress: mac}, "pikvm"},
+		{"redfish beats ipmi and mac", model.Server{BMCType: model.BMCIDRAC, RedfishUser: "root", IPMIUser: "ipmi", MACAddress: mac}, "redfish"},
+		{"ipmi beats mac", model.Server{BMCType: model.BMCGeneric, IPMIUser: "ipmi", MACAddress: mac}, "ipmi"},
+		{"mac only", model.Server{BMCType: model.BMCGeneric, MACAddress: mac}, "wake-on-lan"},
+		{"nothing", model.Server{BMCType: model.BMCGeneric}, "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ProtocolFor(&tc.s); got != tc.want {
+				t.Errorf("ProtocolFor = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckAll(t *testing.T) {
+	c, st := newWoLController(t, nil)
+
+	// More servers than checkAllConcurrency, so the loop has to wait for a free
+	// slot. Each fake BMC reports its own state, so a result written to the wrong
+	// server (or not at all) shows up.
+	const n = checkAllConcurrency + 4
+	servers := make([]*model.Server, 0, n+1)
+	want := map[int64]string{}
+	for i := range n {
+		state := "On"
+		if i%2 == 1 {
+			state = "Off"
+		}
+		s := addRedfishBMC(t, st, "rf"+strconv.Itoa(i), func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/redfish/v1/Systems/System.Embedded.1/" {
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			}
+			_, _ = w.Write([]byte(`{"PowerState":"` + state + `"}`))
+		})
+		servers = append(servers, s)
+		want[s.ID] = state
+	}
+	// No credentials: nothing to query, so it must keep its cached status.
+	idle := &model.Server{Name: "idle", IPAddress: "192.0.2.30", BMCType: model.BMCGeneric, Status: "Off"}
+	if err := st.CreateServer(idle); err != nil {
+		t.Fatalf("CreateServer: %v", err)
+	}
+	servers = append(servers, idle)
+	want[idle.ID] = "Off"
+
+	c.CheckAll(t.Context(), servers)
+
+	for _, s := range servers {
+		persisted, err := st.GetServer(s.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Status != want[s.ID] || persisted.Status != want[s.ID] {
+			t.Errorf("%s: status mem=%q db=%q, want %q", s.Name, s.Status, persisted.Status, want[s.ID])
+		}
+		// Only a server that was actually queried gets a fresh timestamp.
+		if stamped, wantStamped := !s.LastUpdated.IsZero(), s != idle; stamped != wantStamped {
+			t.Errorf("%s: LastUpdated set = %v, want %v", s.Name, stamped, wantStamped)
+		}
 	}
 }

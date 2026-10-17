@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,17 +55,58 @@ func NewController(st *store.Store, wolEnabled bool) *Controller {
 	return &Controller{store: st, wolEnabled: wolEnabled, sendWoL: sendMagicPacket}
 }
 
-// Send selects exactly one protocol by credential availability — not a fallback
-// chain. The context bounds the underlying network/exec call.
-func (c *Controller) Send(ctx context.Context, s *model.Server, command string) (bool, string) {
-	// PiKVM speaks neither Redfish nor IPMI, so it must be routed first.
-	if s.BMCType == model.BMCPiKVM {
-		return c.pikvmCommand(ctx, s, command)
-	}
+// Protocol is the single power-control path used for a server. Send and
+// CheckStatus both act on exactly the Protocol that ProtocolFor reports, so
+// anything that wants to say how a server is controlled should ask ProtocolFor
+// instead of re-deriving it from the credential fields.
+type Protocol string
+
+const (
+	// ProtocolPiKVM is the PiKVM ATX board, over the kvmd HTTP API.
+	ProtocolPiKVM Protocol = "pikvm"
+	// ProtocolRedfish is a Dell-style Redfish ComputerSystem.Reset action.
+	ProtocolRedfish Protocol = "redfish"
+	// ProtocolIPMI is ipmitool over LAN.
+	ProtocolIPMI Protocol = "ipmi"
+	// ProtocolWoL is a Wake-on-LAN magic packet. It can only power a host on and
+	// cannot report its state.
+	ProtocolWoL Protocol = "wake-on-lan"
+	// ProtocolNone means no power control is configured.
+	ProtocolNone Protocol = "none"
+)
+
+// ProtocolFor selects exactly one protocol by credential availability — not a
+// fallback chain: PiKVM when the BMC type says so, else Redfish when a Redfish
+// user is set, else IPMI when an IPMI user is set, else Wake-on-LAN when a MAC
+// address is set, else ProtocolNone. A PiKVM never falls through to the others,
+// even with no credentials. A MAC-only server reports ProtocolWoL whether or not
+// WOL_ENABLED is set: the flag is enforced when a packet is sent (wolCommand),
+// so a "wake-on-lan" server can still refuse to power on.
+func ProtocolFor(s *model.Server) Protocol {
 	switch {
+	// PiKVM speaks neither Redfish nor IPMI, so it must be routed first.
+	case s.BMCType == model.BMCPiKVM:
+		return ProtocolPiKVM
 	case s.RedfishUser != "":
-		return c.redfishCommand(ctx, s, command)
+		return ProtocolRedfish
 	case s.IPMIUser != "":
+		return ProtocolIPMI
+	case s.MACAddress != "":
+		return ProtocolWoL
+	default:
+		return ProtocolNone
+	}
+}
+
+// Send runs command through the one protocol ProtocolFor selects for s. The
+// context bounds the underlying network/exec call.
+func (c *Controller) Send(ctx context.Context, s *model.Server, command string) (bool, string) {
+	switch ProtocolFor(s) {
+	case ProtocolPiKVM:
+		return c.pikvmCommand(ctx, s, command)
+	case ProtocolRedfish:
+		return c.redfishCommand(ctx, s, command)
+	case ProtocolIPMI:
 		var ipmi string
 		switch command {
 		case "power on":
@@ -79,14 +121,17 @@ func (c *Controller) Send(ctx context.Context, s *model.Server, command string) 
 			return false, "Invalid command"
 		}
 		return c.ipmiCommand(ctx, s, ipmi)
-	case s.MACAddress != "" && command == "power on":
-		return c.wolCommand(s)
-	default:
+	case ProtocolWoL:
 		if command == "power on" {
-			return false, "No authentication credentials or MAC address configured"
+			return c.wolCommand(s)
 		}
-		return false, "No authentication credentials configured (Wake-on-LAN only supports power on)"
 	}
+	// Reached when nothing is configured, or when only a MAC address is and the
+	// command is anything but power on (all Wake-on-LAN can do).
+	if command == "power on" {
+		return false, "No authentication credentials or MAC address configured"
+	}
+	return false, "No authentication credentials configured (Wake-on-LAN only supports power on)"
 }
 
 // redfishCommand sends a Dell-style Redfish ComputerSystem.Reset action.
@@ -487,17 +532,39 @@ func sendMagicPacket(packet []byte, ip string, port int) error {
 // CheckStatus queries the live power state, persists it, and returns it. On any
 // error it returns the last-known cached status.
 func (c *Controller) CheckStatus(ctx context.Context, s *model.Server) string {
-	if s.BMCType == model.BMCPiKVM {
+	switch ProtocolFor(s) {
+	case ProtocolPiKVM:
 		return c.checkStatusPiKVM(ctx, s)
-	}
-	switch {
-	case s.RedfishUser != "":
+	case ProtocolRedfish:
 		return c.checkStatusRedfish(ctx, s)
-	case s.IPMIUser != "":
+	case ProtocolIPMI:
 		return c.checkStatusIPMI(ctx, s)
 	default:
+		// Wake-on-LAN (or nothing at all) has no way to read the power state.
 		return s.Status
 	}
+}
+
+// checkAllConcurrency bounds the parallel BMC status checks of CheckAll.
+const checkAllConcurrency = 8
+
+// CheckAll runs CheckStatus for every server, at most checkAllConcurrency at a
+// time, and returns once all are done. As with CheckStatus, a successful live
+// check updates the server's Status and LastUpdated in place. The servers must
+// be distinct pointers, since the checks run concurrently.
+func (c *Controller) CheckAll(ctx context.Context, servers []*model.Server) {
+	// Each check can block for the full BMC timeout on an unreachable host, so
+	// run them concurrently (bounded) rather than holding the caller N x timeout.
+	sem := make(chan struct{}, checkAllConcurrency)
+	var wg sync.WaitGroup
+	for _, s := range servers {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			c.CheckStatus(ctx, s)
+		})
+	}
+	wg.Wait()
 }
 
 func (c *Controller) checkStatusRedfish(ctx context.Context, s *model.Server) string {

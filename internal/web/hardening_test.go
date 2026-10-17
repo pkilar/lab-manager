@@ -312,7 +312,7 @@ func TestLogoutIsPOSTOnly(t *testing.T) {
 func TestCheckAllServersRedirectsWithFlash(t *testing.T) {
 	srv, c, st := testServer(t)
 	readyUser(t, srv.URL, c)
-	const n = 20 // more than checkAllConcurrency
+	const n = 20 // more than power.Controller.CheckAll runs at once
 	for i := range n {
 		if err := st.CreateServer(&model.Server{Name: "box" + strconv.Itoa(i), IPAddress: "10.0.0.9", BMCType: "generic"}); err != nil {
 			t.Fatalf("CreateServer: %v", err)

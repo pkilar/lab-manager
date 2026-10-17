@@ -10,6 +10,7 @@ A Go web application for managing physical servers via IPMI and Redfish protocol
 - Power control: On, Off, Restart, Cycle
 - Real-time server status monitoring
 - Wake-on-LAN support (optional, disabled by default)
+- MCP server so AI agents such as Claude Code can check status and control power (optional, disabled by default)
 - SQLite database for server configuration
 - User authentication
 
@@ -88,6 +89,11 @@ WOL_ENABLED=false
 # BMC KVM reverse-proxy base domain (disabled by default). See "iDRAC KVM
 # auto-login" and "PiKVM" below. Swarm/Traefik deploy only.
 LAB_MANAGER_BMC_PROXY_DOMAIN=
+
+# Bearer token for the MCP endpoint (disabled by default). At least 32
+# characters; generate with: openssl rand -hex 32. See "MCP server for AI
+# agents" below.
+LAB_MANAGER_MCP_TOKEN=
 ```
 
 ### Production Deployment
@@ -295,6 +301,63 @@ the only way to log in automatically: PiKVM's `auth_token` cookie is
 navigation that follows. Without the proxy, both buttons open the PiKVM's own pages
 and you log in there (🔑 shows the credentials).
 
+### MCP server for AI agents (opt-in)
+
+Setting `LAB_MANAGER_MCP_TOKEN` turns on a [Model Context Protocol](https://modelcontextprotocol.io)
+endpoint at `/mcp`, so an AI agent such as Claude Code can see your servers, check
+their power state and power them on or off. The app serves it itself (streamable
+HTTP, stateless, on the same host and port as the web UI), so it works in both the
+`docker-compose` and the Swarm deploy. With the variable unset, `/mcp` returns 404.
+
+#### Enabling
+
+1. Generate a token: `openssl rand -hex 32`. The app refuses to start if the token
+   is shorter than 32 characters or contains anything but letters, digits and
+   `-._~+/=`.
+2. Set `LAB_MANAGER_MCP_TOKEN` to it (`.env` for docker-compose; the Portainer stack
+   environment for Swarm, since `docker stack deploy` does not read `.env`) and
+   redeploy.
+
+#### Connecting Claude Code
+
+```bash
+claude mcp add --transport http --scope user lab-manager \
+  https://lab.pi.home.kilar.net/mcp --header "Authorization: Bearer <token>"
+```
+
+`--scope user` keeps the token in your private `~/.claude.json`. Don't use
+`--scope project`, which writes it into the repository's `.mcp.json`. The endpoint
+only takes a static bearer token (no OAuth), so use a client that lets you set the
+`Authorization` header.
+
+#### Tools
+
+| Tool | What it does |
+|------|--------------|
+| `list_servers` | Every server's id, name, IP, BMC type, power-control path, last recorded status and notes. Reads the database only; no BMC is contacted. |
+| `check_power_status` | Reads one server's power state from its BMC and records it. Up to ~30s on a slow or unreachable BMC; if the BMC can't be read, the last recorded status comes back marked `live: false`. |
+| `check_all_power_status` | The same for every server, in parallel. |
+| `power_on` | Powers on through the server's power-control path (PiKVM, Redfish, IPMI, or Wake-on-LAN for MAC-only servers). |
+| `power_off` | Graceful shutdown on Redfish and PiKVM; on IPMI it cuts power immediately. Marked destructive. |
+| `power_cycle` | Hard reset (Redfish ForceRestart, IPMI power cycle, PiKVM reset button). Marked destructive. |
+
+Power tools return once the BMC accepts the command, not when the server has finished
+booting or shutting down. Ask for `check_power_status` afterwards to confirm.
+
+#### Security
+
+- The token grants power control over every server. Treat it like
+  `LAB_MANAGER_SECRET_KEY`. To rotate it, set a new value and redeploy; the old one
+  stops working immediately.
+- Stored BMC credentials, MAC addresses and serial-console settings are never sent
+  over MCP, and there are no tools to add, edit or delete servers. Server notes *are*
+  returned by `list_servers`, so keep secrets out of them.
+- `/mcp` ignores the web session cookie and needs no CSRF token: the bearer token is
+  the only way in. Cross-origin browser requests to it are rejected.
+- `power_off` and `power_cycle` carry MCP's destructive hint, and Claude Code asks
+  before every tool call unless you allow it. Every power command sent over MCP is
+  logged as `mcp power command`.
+
 ## Usage
 
 ### Adding a Server
@@ -353,6 +416,8 @@ and you log in there (🔑 shows the credentials).
   `./instance` stays readable from the host). Volumes from older root-run images
   are migrated automatically on first start.
 - SECRET_KEY should be set for production deployments
+- The optional MCP endpoint (`/mcp`) accepts only the `LAB_MANAGER_MCP_TOKEN` bearer
+  token and never returns stored credentials; see "MCP server for AI agents"
 
 ## Development
 

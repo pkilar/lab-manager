@@ -165,3 +165,55 @@ func TestEnvBool(t *testing.T) {
 		})
 	}
 }
+
+// The MCP token is checked on every start, strict or not: the endpoint is
+// opt-in and the token alone powers servers on and off.
+func TestCheckMCPToken(t *testing.T) {
+	cases := []struct {
+		name         string
+		token        string
+		wantErr      bool
+		wantMentions []string
+	}{
+		{name: "unset leaves the feature off", token: ""},
+		{name: "openssl rand -hex 32", token: goodSecretKey},
+		{name: "base64 with padding", token: "Zm9vYmFyLWJhei1xdXV4LTEyMzQ1Njc4OTAtYWJj/+_~.-=="},
+		{name: "exactly the minimum", token: strings.Repeat("a", minSecretKeyLen)},
+		{
+			name: "one char under the minimum", token: strings.Repeat("a", minSecretKeyLen-1),
+			wantErr: true, wantMentions: []string{"LAB_MANAGER_MCP_TOKEN", "31 characters", "at least 32"},
+		},
+		{
+			name: "placeholder", token: "changeme",
+			wantErr: true, wantMentions: []string{"LAB_MANAGER_MCP_TOKEN", "openssl rand -hex 32"},
+		},
+		{
+			// A value pasted with its newline can never be sent by a client.
+			name: "trailing newline", token: goodSecretKey + "\n",
+			wantErr: true, wantMentions: []string{"LAB_MANAGER_MCP_TOKEN", "not a valid bearer token"},
+		},
+		{name: "inner space", token: goodSecretKey[:32] + " " + goodSecretKey[32:], wantErr: true},
+		{name: "quote characters", token: `"` + goodSecretKey + `"`, wantErr: true},
+		{name: "padding only", token: strings.Repeat("=", minSecretKeyLen), wantErr: true},
+		{name: "padding in the middle", token: goodSecretKey[:32] + "=" + goodSecretKey[32:], wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkMCPToken(tc.token)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("checkMCPToken(%q) error = %v, wantErr %v", tc.token, err, tc.wantErr)
+			}
+			if err == nil {
+				return
+			}
+			if strings.Contains(err.Error(), strings.TrimSpace(tc.token)) {
+				t.Errorf("error echoes the token: %q", err)
+			}
+			for _, want := range tc.wantMentions {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should mention %q", err, want)
+				}
+			}
+		})
+	}
+}

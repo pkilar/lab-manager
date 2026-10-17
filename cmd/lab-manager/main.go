@@ -56,6 +56,10 @@ func run() error {
 		slog.Warn("BMC proxy disabled: LAB_MANAGER_BMC_PROXY_DOMAIN is empty " +
 			"(no KVM auto-login; Console falls back to showing credentials)")
 	}
+	mcpToken := os.Getenv("LAB_MANAGER_MCP_TOKEN")
+	if err := checkMCPToken(mcpToken); err != nil {
+		return err
+	}
 
 	// The dir holds the DB and the encryption key; owner-only (MkdirAll leaves an
 	// existing dir's mode alone).
@@ -92,7 +96,7 @@ func run() error {
 		return err
 	}
 
-	app, err := web.New(st, secretKey, wolEnabled, bmcProxyDomain)
+	app, err := web.New(st, secretKey, wolEnabled, bmcProxyDomain, mcpToken)
 	if err != nil {
 		return err
 	}
@@ -115,7 +119,8 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("lab-manager listening", "addr", ":5000", "wol_enabled", wolEnabled, "bmc_proxy_domain", bmcProxyDomain)
+		slog.Info("lab-manager listening", "addr", ":5000", "wol_enabled", wolEnabled,
+			"bmc_proxy_domain", bmcProxyDomain, "mcp_enabled", mcpToken != "")
 		serveErr <- srv.ListenAndServe()
 	}()
 
@@ -218,6 +223,46 @@ func checkStrictConfig(strict bool, secretKey, bmcProxyDomain, encryptionKey str
 		"`docker stack deploy` does not read .env - export these in the deploying shell "+
 		"or set them in the Portainer stack environment, then redeploy",
 		strings.Join(problems, "\n  - "))
+}
+
+// checkMCPToken refuses a LAB_MANAGER_MCP_TOKEN that is set but weak or
+// unsendable. Unlike checkStrictConfig it always applies: the MCP endpoint is
+// opt-in, so there is no lenient deploy that must keep starting, and the token
+// alone grants power control over every server. Empty means the feature is off.
+func checkMCPToken(token string) error {
+	if token == "" {
+		return nil
+	}
+	if !isBearerToken(token) {
+		return errors.New("LAB_MANAGER_MCP_TOKEN is not a valid bearer token: use only letters, " +
+			"digits and -._~+/ (optionally ending in =), e.g. `openssl rand -hex 32`")
+	}
+	if len(token) < minSecretKeyLen {
+		return fmt.Errorf("LAB_MANAGER_MCP_TOKEN is only %d characters, need at least %d "+
+			"(generate with `openssl rand -hex 32`) - it grants power control over every server",
+			len(token), minSecretKeyLen)
+	}
+	return nil
+}
+
+// isBearerToken reports whether s fits RFC 6750's b64token syntax, the only
+// form a client can put in an `Authorization: Bearer` header. It catches, for
+// instance, a trailing newline pasted in with the value, which would otherwise
+// leave a token that no client can ever present.
+func isBearerToken(s string) bool {
+	body := strings.TrimRight(s, "=")
+	if body == "" {
+		return false
+	}
+	for _, c := range body {
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case strings.ContainsRune("-._~+/", c):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // loadSecretKey reads LAB_MANAGER_SECRET_KEY, or generates an ephemeral key (with a
