@@ -1,12 +1,12 @@
 module github.com/pkilar/lab-manager
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/crypto v0.58.0
-	modernc.org/sqlite v1.60.1
+	modernc.org/sqlite v1.61.1
 )
 
 require (
@@ -23,8 +23,7 @@ require (
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
-	golang.org/x/tools v0.52.0 // indirect
-	modernc.org/libc v1.77.1 // indirect
+	modernc.org/libc v1.79.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
