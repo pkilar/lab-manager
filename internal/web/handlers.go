@@ -73,7 +73,17 @@ func requestScheme(r *http.Request) string {
 	}
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		first, _, _ := strings.Cut(proto, ",")
-		return strings.ToLower(strings.TrimSpace(first))
+		switch p := strings.ToLower(strings.TrimSpace(first)); p {
+		// Traefik sends wss/ws on a WebSocket upgrade. The scheme picks the
+		// session cookie's name, so reading "wss" as-is sent the SOL socket
+		// looking for the plain-HTTP cookie and every connection to /login.
+		case "wss":
+			return "https"
+		case "ws":
+			return "http"
+		default:
+			return p
+		}
 	}
 	return "http"
 }

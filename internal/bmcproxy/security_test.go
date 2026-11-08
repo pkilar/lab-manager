@@ -183,6 +183,27 @@ func TestHandshakeIgnoresFetchMetadata(t *testing.T) {
 	}
 }
 
+// Traefik sends X-Forwarded-Proto: wss on a WebSocket upgrade (the iDRAC and
+// kvmd consoles). Read as-is, the relay looked for the plain-HTTP cookie name
+// and lost the session the HTTPS handshake had set.
+func TestProxySchemeMapsWebSocketProtos(t *testing.T) {
+	for proto, want := range map[string]string{
+		"https": "https", "wss": "https", "WSS": "https",
+		"http": "http", "ws": "http",
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("X-Forwarded-Proto", proto)
+		if got := proxyScheme(r); got != want {
+			t.Errorf("X-Forwarded-Proto %q: scheme %q, want %q", proto, got, want)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Forwarded-Proto", "wss")
+	if name := cookieNameFor(r); name != "__Host-bmcproxy" {
+		t.Errorf("cookie name for a wss upgrade = %q, want __Host-bmcproxy", name)
+	}
+}
+
 func TestProxyCookieNameFollowsScheme(t *testing.T) {
 	idrac := newFakeIDRAC(t)
 	m := NewManager(fakeLookup{1: {ID: 1, BMCType: model.BMCIDRAC, IPAddress: hostport(idrac), RedfishUser: "root", RedfishPassword: "calvin"}}, []byte("s"), "pi.home.kilar.net")

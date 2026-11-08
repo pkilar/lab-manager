@@ -303,6 +303,56 @@ func TestHTTPSLoginUsesHostCookie(t *testing.T) {
 	}
 }
 
+// Traefik sends X-Forwarded-Proto: wss (not https) on a WebSocket upgrade. Read
+// as-is, the SOL socket looked for the plain-HTTP cookie name and every
+// connection was redirected to /login.
+func TestRequestSchemeMapsWebSocketProtos(t *testing.T) {
+	for proto, want := range map[string]string{
+		"https": "https", "wss": "https", "WSS": "https", "wss, https": "https",
+		"http": "http", "ws": "http",
+	} {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("X-Forwarded-Proto", proto)
+		if got := requestScheme(r); got != want {
+			t.Errorf("X-Forwarded-Proto %q: scheme %q, want %q", proto, got, want)
+		}
+	}
+}
+
+func TestSOLSocketHonoursHostCookieBehindTraefik(t *testing.T) {
+	srv, _, _, _ := testServerApp(t)
+	// A cookie jar won't send a Secure __Host- cookie to the http:// test
+	// server, so carry the latest one by hand, as a browser would.
+	var sess *http.Cookie
+	do := func(method, path, proto string, form url.Values) *http.Response {
+		var cookies []*http.Cookie
+		if sess != nil {
+			cookies = []*http.Cookie{sess}
+		}
+		resp := doReq(t, method, srv.URL+path, map[string]string{"X-Forwarded-Proto": proto}, cookies, form)
+		if c := setCookie(resp, hostSessionCookie); c != nil {
+			sess = c
+		}
+		return resp
+	}
+	csrf := csrfFrom(t, readBody(t, do("GET", "/login", "https", nil)))
+	mustRedirect(t, do("POST", "/login", "https",
+		url.Values{"username": {"admin"}, "password": {"admin"}, "csrf_token": {csrf}}), "/change-password")
+	// The password-change gate would redirect too; clear it so a redirect below
+	// can only mean the session wasn't recognised.
+	csrf = csrfFrom(t, readBody(t, do("GET", "/change-password", "https", nil)))
+	mustRedirect(t, do("POST", "/change-password", "https", url.Values{
+		"current_password": {"admin"}, "new_password": {"labpass123"},
+		"confirm_password": {"labpass123"}, "csrf_token": {csrf},
+	}), "/")
+
+	resp := do("GET", "/server/1/sol", "wss", nil)
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusSeeOther {
+		t.Fatalf("SOL socket behind Traefik (X-Forwarded-Proto: wss) redirected to %q: session cookie not honoured",
+			resp.Header.Get("Location"))
+	}
+}
+
 func TestRequestSchemeDirectTLS(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.TLS = &tls.ConnectionState{}

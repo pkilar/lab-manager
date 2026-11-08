@@ -535,7 +535,17 @@ func injectScript(htmlDoc []byte, script string) []byte {
 func proxyScheme(r *http.Request) string {
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		first, _, _ := strings.Cut(proto, ",")
-		return strings.ToLower(strings.TrimSpace(first))
+		switch p := strings.ToLower(strings.TrimSpace(first)); p {
+		// Traefik sends wss/ws on a WebSocket upgrade (the iDRAC and kvmd
+		// consoles). The scheme picks the proxy cookie's name, so "wss" read
+		// as-is lost the session the HTTPS handshake had set.
+		case "wss":
+			return "https"
+		case "ws":
+			return "http"
+		default:
+			return p
+		}
 	}
 	if r.TLS != nil {
 		return "https"
