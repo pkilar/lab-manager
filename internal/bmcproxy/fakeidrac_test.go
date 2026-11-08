@@ -126,6 +126,27 @@ func newFakeIDRAC(t *testing.T) *fakeIDRAC {
 			r.Header.Get("X-Real-Ip"))
 	})
 
+	mux.HandleFunc("/hdrs", func(w http.ResponseWriter, r *http.Request) {
+		if !requireSession(r) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintf(w, "auth=%s|pauth=%s|kvmd=%s|kvmd2=%s|cookie=%s",
+			r.Header.Get("Authorization"), r.Header.Get("Proxy-Authorization"),
+			r.Header.Get("X-Kvmd-User"), r.Header.Get("X-KVMD-Passwd"), r.Header.Get("Cookie"))
+	})
+
+	mux.HandleFunc("/hostile", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://evil.example/steal?x=1")
+		w.Header().Set("Content-Location", "//evil.example")
+		w.Header().Set("Refresh", "0; url=https://evil.example/r")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'")
+		w.Header().Add("Set-Cookie", `plant=a"b; Domain=.pi.home.kilar.net; Path=/`)
+		w.Header().Add("Set-Cookie", "__Host-bmcproxy=evil; Path=/")
+		w.Header().Add("Set-Cookie", "session=evil; Path=/")
+		w.WriteHeader(http.StatusFound)
+	})
+
 	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://"+r.Host+"/protected", http.StatusFound)
 	})

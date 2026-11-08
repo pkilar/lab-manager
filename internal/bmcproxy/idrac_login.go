@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -22,6 +23,10 @@ const idracSessionCookie = "-http-session-"
 // does not interrupt the KVM WebSocket once the 101 upgrade has come back).
 var proxyTransport = &http.Transport{
 	TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // BMCs use self-signed certs
+	// A BMC that accepts the TCP connection but never answers the handshake
+	// would otherwise hang a login (or relay) until its own context expires.
+	DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+	TLSHandshakeTimeout: 10 * time.Second,
 	// A hand-rolled Transport does NOT inherit http.DefaultTransport's pooling:
 	// MaxIdleConnsPerHost falls back to DefaultMaxIdleConnsPerHost, which is 2.
 	// The iDRAC UI pulls dozens of resources per page, so all but two needed a
@@ -101,7 +106,7 @@ func idracLogin(ctx context.Context, ip, user, pass string) (cookie, forwardURL 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := loginClient.Do(req)
+	resp, err := loginClient.Do(req) //nolint:gosec // G704: the target is the server's stored BMC address (BMCHost), never request input
 	if err != nil {
 		return "", "", err
 	}

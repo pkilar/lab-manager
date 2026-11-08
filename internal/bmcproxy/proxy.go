@@ -2,6 +2,7 @@ package bmcproxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,35 @@ import (
 // proxyCookieName is the opaque session cookie the browser holds on the proxy
 // subdomain. It maps to server-side state (the injected BMC cookie).
 const proxyCookieName = "bmcproxy"
+
+// hostProxyCookieName is the HTTPS name: the __Host- prefix makes the browser
+// refuse a copy planted by a sibling *.<domain> page (it requires Secure, Path=/
+// and no Domain, which only this host can set).
+const hostProxyCookieName = "__Host-" + proxyCookieName
+
+// reservedCookies are names a BMC may neither set nor receive: ours, and the main
+// app's session cookie (both spellings), which lives on a sibling host.
+var reservedCookies = []string{proxyCookieName, hostProxyCookieName, "session", "__Host-session"}
+
+func reservedCookie(name string) bool {
+	return slices.Contains(reservedCookies, name)
+}
+
+// cookieNameFor picks the proxy cookie name for the scheme the browser used.
+func cookieNameFor(r *http.Request) string {
+	if proxyScheme(r) == "https" {
+		return hostProxyCookieName
+	}
+	return proxyCookieName
+}
+
+// bmcHost resolves the address used to reach a server's BMC. A variable so
+// tests, whose fake BMCs listen on host:port, can substitute their own.
+var bmcHost = func(s *model.Server) (string, bool) { return s.BMCHost() }
+
+// errCredentialsUnreadable is returned instead of logging in with an empty
+// password when the stored one no longer decrypts.
+var errCredentialsUnreadable = errors.New("stored credentials can't be decrypted (the encryption key changed); re-enter them on the server's edit page")
 
 // ServerLookup fetches a server by id; *store.Store satisfies it.
 type ServerLookup interface {
@@ -35,6 +66,7 @@ type Manager struct {
 	secret   []byte
 	domain   string // e.g. "pi.home.kilar.net"; empty disables the feature
 	sessions *sessionStore
+	used     usedTokens
 
 	done      chan struct{} // closed by Close to stop sessionGC
 	closeOnce sync.Once
@@ -121,6 +153,11 @@ func (m *Manager) Supports(bmcType string) bool {
 	return m.Enabled() && vendorFor(bmcType) != nil
 }
 
+// bareHost strips any port and IPv6 brackets.
+func bareHost(host string) string {
+	return strings.Trim(stripPort(host), "[]")
+}
+
 func stripPort(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		return h
@@ -186,7 +223,7 @@ func upstreamHost(v *vendor, ip, inboundHost string) string {
 		return ip
 	}
 	if _, port, err := net.SplitHostPort(inboundHost); err == nil && port == v.consolePort {
-		return net.JoinHostPort(stripPort(ip), v.consolePort)
+		return net.JoinHostPort(bareHost(ip), v.consolePort)
 	}
 	return ip
 }
@@ -195,7 +232,7 @@ func upstreamHost(v *vendor, ip, inboundHost string) string {
 // server-side session cookie. A single ReverseProxy handles both plain HTTP and
 // the KVM WebSocket (it natively tunnels Upgrade requests).
 func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64, v *vendor) {
-	if crossSiteWrite(r) {
+	if fetchSiteRefused(r) || crossSiteWrite(r) {
 		http.Error(w, "cross-site request refused", http.StatusForbidden)
 		return
 	}
@@ -209,7 +246,12 @@ func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64, v *ven
 		http.Error(w, "server not found", http.StatusNotFound)
 		return
 	}
-	if s.IPAddress != sess.ip || sess.vendor != v || s.BMCType != v.bmcType {
+	host, hostOK := bmcHost(s)
+	if !hostOK {
+		http.NotFound(w, r)
+		return
+	}
+	if host != sess.ip || sess.vendor != v || s.BMCType != v.bmcType {
 		// The server's address (or BMC type) changed since login: the session
 		// cookie belongs to the old BMC and must not be replayed to whatever is
 		// at the new address, nor across vendors. Release it where it was
@@ -220,7 +262,7 @@ func (m *Manager) relay(w http.ResponseWriter, r *http.Request, id int64, v *ven
 		m.bounceToInitiator(w, r, id, v)
 		return
 	}
-	m.serveHTTP(w, r, v, sid, upstreamHost(v, s.IPAddress, r.Host), sess.bmcCookie)
+	m.serveHTTP(w, r, v, sid, upstreamHost(v, host, r.Host), sess.bmcCookie)
 }
 
 // bounceToInitiator sends the browser back through the login-gated initiator.
@@ -232,7 +274,7 @@ func (m *Manager) bounceToInitiator(w http.ResponseWriter, r *http.Request, id i
 	if name := v.targetName(r.URL.Path); name != "" {
 		dest += "?to=" + url.QueryEscape(name)
 	}
-	http.Redirect(w, r, dest, http.StatusFound)
+	http.Redirect(w, r, dest, http.StatusFound) //nolint:gosec // G710: dest is lab.<configured domain> + a fixed path
 }
 
 // crossSiteWrite reports whether r is a state-changing request or a WebSocket
@@ -261,13 +303,41 @@ func crossSiteWrite(r *http.Request) bool {
 	return !strings.EqualFold(u.Hostname(), stripPort(r.Host))
 }
 
+// fetchSiteRefused applies a Fetch Metadata policy to relayed requests. The proxy
+// cookie is SameSite=Lax, so a sibling page's <img src=https://idrac-1.<domain>/..>
+// would otherwise carry it. same-origin/none (typed URL, bookmark) and absent
+// headers (non-browser, old browser) pass; cross-site never does; same-site passes
+// only as a top-level navigation (the app's 302 chain into the landing page) or
+// when Origin names this very host, which is the :5900 console WebSocket that
+// browsers label same-site because the ports differ.
+func fetchSiteRefused(r *http.Request) bool {
+	switch strings.ToLower(r.Header.Get("Sec-Fetch-Site")) {
+	case "", "same-origin", "none":
+		return false
+	case "same-site":
+		if strings.EqualFold(r.Header.Get("Sec-Fetch-Mode"), "navigate") &&
+			strings.EqualFold(r.Header.Get("Sec-Fetch-Dest"), "document") {
+			return false
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if u, err := url.Parse(origin); err == nil && u.Hostname() != "" &&
+				strings.EqualFold(u.Hostname(), stripPort(r.Host)) {
+				return false
+			}
+		}
+		return true
+	default:
+		return true
+	}
+}
+
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(strings.Join(r.Header.Values("Connection"), ",")), "upgrade") &&
 		strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
 }
 
 func (m *Manager) sessionFor(r *http.Request) (proxySession, string, bool) {
-	c, err := r.Cookie(proxyCookieName)
+	c, err := r.Cookie(cookieNameFor(r))
 	if err != nil {
 		return proxySession{}, "", false
 	}
@@ -294,7 +364,7 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, v *vendor, s
 			// session, then inject the server-held BMC session (if any).
 			var keep []string
 			for _, c := range pr.Out.Cookies() {
-				if c.Name == proxyCookieName || c.Name == v.sessionCookie {
+				if reservedCookie(c.Name) || c.Name == v.sessionCookie {
 					continue
 				}
 				keep = append(keep, c.Name+"="+c.Value)
@@ -312,6 +382,15 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request, v *vendor, s
 			// X-Forwarded-*/Forwarded headers, but Traefik's X-Real-Ip
 			// is not one of them, so drop it explicitly.
 			pr.Out.Header.Del("X-Real-Ip")
+			// The browser's credentials for other things are not the BMC's
+			// business, and kvmd treats X-KVMD-* as a header-auth channel.
+			pr.Out.Header.Del("Authorization")
+			pr.Out.Header.Del("Proxy-Authorization")
+			for k := range pr.Out.Header {
+				if strings.HasPrefix(strings.ToLower(k), "x-kvmd-") {
+					pr.Out.Header.Del(k)
+				}
+			}
 			// Ask the BMC for identity encoding so ModifyResponse can inject the
 			// auto-launch script into the dashboard HTML without gzip surgery.
 			// This is a low-traffic admin proxy on a LAN; the lost compression
@@ -464,23 +543,49 @@ func proxyScheme(r *http.Request) string {
 	return "http"
 }
 
-// rewriteLocation rewrites a redirect that points at the iDRAC host so it points
-// at the proxy host instead; relative and other-host Locations are left alone.
+// rewriteLocation keeps redirects on the proxy host. A Location (and Refresh /
+// Content-Location URL) naming the BMC keeps its path with the proxy host swapped
+// in; any other absolute or scheme-relative URL is reduced to its path+query on
+// the proxy host, so a compromised BMC can't send the browser off-site. Plain
+// relative URLs are left alone.
 func rewriteLocation(resp *http.Response, ip, proxyHost, scheme string) {
-	loc := resp.Header.Get("Location")
-	if loc == "" {
-		return
-	}
-	u, err := url.Parse(loc)
-	if err != nil {
-		return
-	}
-	// Compare on hostname so a redirect to https://<ip>:443/... (common from
-	// iDRAC) is matched even though ip may itself carry a port (in tests).
-	if u.Hostname() == stripPort(ip) {
+	fix := func(raw string) (string, bool) {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Host == "" && u.Scheme == "") {
+			return raw, false
+		}
+		// Compare on hostname so a redirect to https://<ip>:443/... (common from
+		// iDRAC) is matched even though ip may itself carry a port (in tests).
+		if u.Hostname() != bareHost(ip) {
+			path := u.EscapedPath()
+			if path == "" {
+				path = "/"
+			}
+			out := scheme + "://" + proxyHost + path
+			if u.RawQuery != "" {
+				out += "?" + u.RawQuery
+			}
+			return out, true
+		}
 		u.Scheme = scheme
 		u.Host = proxyHost
-		resp.Header.Set("Location", u.String())
+		return u.String(), true
+	}
+	for _, h := range []string{"Location", "Content-Location"} {
+		if loc := resp.Header.Get(h); loc != "" {
+			if out, ok := fix(loc); ok {
+				resp.Header.Set(h, out)
+			}
+		}
+	}
+	// Refresh: "<seconds>; url=<target>".
+	if ref := resp.Header.Get("Refresh"); ref != "" {
+		if i := strings.Index(strings.ToLower(ref), "url="); i >= 0 {
+			target := strings.Trim(strings.TrimSpace(ref[i+4:]), `"'`)
+			if out, ok := fix(target); ok {
+				resp.Header.Set("Refresh", ref[:i+4]+out)
+			}
+		}
 	}
 }
 
@@ -502,11 +607,21 @@ func (m *Manager) rewriteSetCookies(resp *http.Response, sid string, v *vendor) 
 			// cookies keep passing through verbatim -- the BMC UI cookies
 			// that work today must not start vanishing.
 			name, _, _ := strings.Cut(line, "=")
-			if strings.TrimSpace(name) == v.sessionCookie {
+			name = strings.TrimSpace(name)
+			if name == v.sessionCookie {
 				slog.Warn("bmcproxy dropped unparseable BMC session Set-Cookie", "vendor", v.name, "cookie", v.sessionCookie, "err", err)
 				continue
 			}
-			out = append(out, line)
+			if reservedCookie(name) {
+				continue
+			}
+			// Passed on, but with any Domain attribute removed: otherwise a
+			// hostile BMC could plant a domain-wide cookie on the main app
+			// and every sibling host by making its line unparseable.
+			out = append(out, stripDomainAttr(line))
+			continue
+		}
+		if reservedCookie(c.Name) {
 			continue
 		}
 		if c.Name == v.sessionCookie {
@@ -522,8 +637,25 @@ func (m *Manager) rewriteSetCookies(resp *http.Response, sid string, v *vendor) 
 	}
 }
 
+// stripDomainAttr removes every Domain attribute from a raw Set-Cookie line.
+func stripDomainAttr(line string) string {
+	parts := strings.Split(line, ";")
+	out := parts[:1]
+	for _, p := range parts[1:] {
+		name, _, _ := strings.Cut(p, "=")
+		if strings.EqualFold(strings.TrimSpace(name), "domain") {
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, ";")
+}
+
 // Handler serves one request on a proxy host: the auth handshake, or a relay.
 func (m *Manager) Handler(w http.ResponseWriter, r *http.Request) {
+	// Proxy hosts skip the app's securityHeaders. Added, never set: a CSP from the
+	// BMC is enforced alongside this one. 'self' keeps the iDRAC frameset working.
+	w.Header().Add("Content-Security-Policy", "frame-ancestors 'self'")
 	id, v, ok := m.resolveHost(r.Host)
 	if !ok {
 		http.NotFound(w, r)
@@ -542,7 +674,7 @@ func (m *Manager) Handler(w http.ResponseWriter, r *http.Request) {
 // the browser already holds a valid session for the same server.
 func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64, v *vendor) {
 	q := r.URL.Query()
-	if !verifyToken(m.secret, q.Get("token"), id) {
+	if tok := q.Get("token"); !verifyToken(m.secret, tok, id) || !m.used.consume(tok) {
 		// Bounce through the login-gated initiator to re-mint, keeping a valid
 		// landing target so an expired terminal handshake returns to it.
 		dest := m.appBaseURL(r) + "/server/" + strconv.FormatInt(id, 10) + "/kvm"
@@ -551,11 +683,16 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64, v
 				dest += "?to=" + url.QueryEscape(to)
 			}
 		}
-		http.Redirect(w, r, dest, http.StatusFound)
+		http.Redirect(w, r, dest, http.StatusFound) //nolint:gosec // G710: dest is lab.<configured domain> + a fixed path
 		return
 	}
 	s, err := m.lookup.GetServer(id)
 	if err != nil || s.BMCType != v.bmcType {
+		http.NotFound(w, r)
+		return
+	}
+	host, hostOK := bmcHost(s)
+	if !hostOK {
 		http.NotFound(w, r)
 		return
 	}
@@ -564,11 +701,15 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64, v
 		// log out the session the first tab is using and the BMC would drop it.
 		// A session the BMC no longer honours falls through to a fresh login,
 		// which displaces (and logs out) the dead one.
-		if sess, _, ok := m.sessionFor(r); ok && sess.serverID == id && sess.ip == s.IPAddress && sess.vendor == v &&
-			v.sessionValid(r.Context(), s.IPAddress, sess.bmcCookie) {
-			http.Redirect(w, r, v.targetPath(q.Get("to")), http.StatusFound)
+		if sess, _, ok := m.sessionFor(r); ok && sess.serverID == id && sess.ip == host && sess.vendor == v &&
+			v.sessionValid(r.Context(), host, sess.bmcCookie) {
+			http.Redirect(w, r, v.targetPath(q.Get("to")), http.StatusFound) //nolint:gosec // G710: targetPath maps an enum to a fixed path
 			return
 		}
+	}
+	if s.CredentialsUnreadable {
+		m.errorPage(w, r, id, v, errCredentialsUnreadable.Error())
+		return
 	}
 	user, pass := s.RedfishUser, s.RedfishPassword
 	if user == "" {
@@ -578,13 +719,13 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64, v
 		m.errorPage(w, r, id, v, "No credentials configured for this server")
 		return
 	}
-	cookie, forwardURL, err := v.login(r.Context(), s.IPAddress, user, pass)
+	cookie, forwardURL, err := v.login(r.Context(), host, user, pass)
 	if err != nil {
 		slog.Error("bmcproxy login", "vendor", v.name, "server_id", id, "err", err)
 		m.errorPage(w, r, id, v, err.Error())
 		return
 	}
-	sid, displaced, err := m.sessions.create(v, id, s.IPAddress, cookie)
+	sid, displaced, err := m.sessions.create(v, id, host, cookie)
 	if err != nil {
 		slog.Error("bmcproxy session create", "server_id", id, "err", err)
 		m.errorPage(w, r, id, v, "internal error")
@@ -600,8 +741,8 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64, v
 		// auto-launch script injected — it clicks the console open for the operator.
 		m.sessions.setAutoLaunch(sid)
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     proxyCookieName,
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is set whenever the request is HTTPS (see below)
+		Name:     cookieNameFor(r),
 		Value:    sid,
 		Path:     "/",
 		HttpOnly: true,
@@ -615,7 +756,7 @@ func (m *Manager) handleAuth(w http.ResponseWriter, r *http.Request, id int64, v
 	if v.targets != nil {
 		dest = v.targetPath(q.Get("to"))
 	}
-	http.Redirect(w, r, dest, http.StatusFound)
+	http.Redirect(w, r, dest, http.StatusFound) //nolint:gosec // G710: safeForwardPath reduces forwardURL to a same-origin path; targetPath is an enum
 }
 
 // safeForwardPath keeps only the path+query of the BMC-supplied forward URL,
@@ -649,7 +790,7 @@ func (m *Manager) errorPage(w http.ResponseWriter, r *http.Request, serverID int
 			`<h2 style="color:#ef4444">Could not open %s</h2><p>%s</p>`,
 		html.EscapeString(v.name), html.EscapeString(v.name), html.EscapeString(msg))
 	if serverID > 0 {
-		fmt.Fprintf(w,
+		fmt.Fprintf(w, //nolint:gosec // G705: base is html-escaped and built from the configured domain
 			`<p><a style="color:#60a5fa" href="%s/server/%d/console/manual">`+
 				`Open the credentials page for manual login &rarr;</a></p>`,
 			html.EscapeString(base), serverID)

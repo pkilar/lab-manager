@@ -51,7 +51,7 @@ func TestHandshakeLogsInAndSetsSession(t *testing.T) {
 	}
 	var sid string
 	for _, c := range resp.Cookies() {
-		if c.Name == proxyCookieName {
+		if c.Name == hostProxyCookieName {
 			sid = c.Value
 			if !c.HttpOnly {
 				t.Error("bmcproxy cookie must be HttpOnly")

@@ -68,9 +68,17 @@ func CredsFor(s *model.Server) (string, string) {
 
 // ---- console access tokens ----------------------------------------------
 
+// tokenPurpose domain-separates launch-token signatures: the same secret also
+// signs session cookies and proxy handshake tokens.
+const tokenPurpose = "console-launch-v1|"
+
+// bmcHost resolves the address used to reach a server's BMC. A variable so
+// tests, whose fake BMCs listen on host:port, can substitute their own.
+var bmcHost = func(s *model.Server) (string, bool) { return s.BMCHost() }
+
 func (m *Manager) GenerateToken(serverID, userID int64) string {
 	ts := m.now().Unix()
-	sig := hmacHex(m.secretKey, fmt.Sprintf("%d:%d:%d", serverID, userID, ts))
+	sig := hmacHex(m.secretKey, fmt.Sprintf("%s%d:%d:%d", tokenPurpose, serverID, userID, ts))
 	return base64.URLEncoding.EncodeToString(fmt.Appendf(nil, "%d:%s", ts, sig))
 }
 
@@ -90,7 +98,7 @@ func (m *Manager) VerifyToken(token string, serverID, userID int64) bool {
 	if m.now().Unix()-ts > TokenValiditySeconds {
 		return false
 	}
-	expected := hmacHex(m.secretKey, fmt.Sprintf("%d:%d:%d", serverID, userID, ts))
+	expected := hmacHex(m.secretKey, fmt.Sprintf("%s%d:%d:%d", tokenPurpose, serverID, userID, ts))
 	return subtle.ConstantTimeCompare([]byte(sig), []byte(expected)) == 1
 }
 
@@ -117,7 +125,10 @@ func LoginConfigFor(s *model.Server) *BMCLoginConfig {
 	if s.RedfishUser == "" && s.IPMIUser == "" {
 		return nil
 	}
-	ip := s.IPAddress
+	ip, ok := bmcHost(s)
+	if !ok {
+		return nil
+	}
 	switch s.BMCType {
 	case model.BMCIDRAC:
 		return &BMCLoginConfig{
@@ -175,9 +186,16 @@ type IDRACAuthResult struct {
 // Any Redfish session opened during validation is deleted before returning, so
 // console launches can't exhaust the iDRAC session table.
 func (m *Manager) PreAuthenticateIDRAC(ctx context.Context, s *model.Server) IDRACAuthResult {
-	ip := s.IPAddress
+	ip, ok := bmcHost(s)
+	if !ok {
+		return IDRACAuthResult{Error: "Server address is not a valid IP"}
+	}
 	res := IDRACAuthResult{ConsoleURL: "https://" + ip + "/"}
 
+	if s.CredentialsUnreadable {
+		res.Error = "Stored credentials can't be decrypted (the encryption key changed); re-enter them on the server's edit page"
+		return res
+	}
 	user, pass := CredsFor(s)
 	if user == "" {
 		res.Error = "No credentials configured"
@@ -387,7 +405,7 @@ func idracLegacyLogout(ctx context.Context, ip string, session *http.Cookie) {
 		slog.Warn("iDRAC legacy logout: build request", "ip", ip, "err", err)
 		return
 	}
-	req.AddCookie(&http.Cookie{Name: session.Name, Value: session.Value})
+	req.AddCookie(&http.Cookie{Name: session.Name, Value: session.Value}) //nolint:gosec // G124: an outgoing request cookie; attributes don't apply
 	resp, err := bmcHTTPClient.Do(req)
 	if err != nil {
 		slog.Warn("iDRAC legacy logout failed; session may linger until it times out", "ip", ip, "err", err)

@@ -7,6 +7,7 @@ package bmcproxy
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -14,11 +15,43 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // tokenValiditySeconds bounds how long a handshake token is usable.
 const tokenValiditySeconds = 30
+
+// tokenPurpose domain-separates handshake signatures: the same secret also signs
+// console launch tokens and session cookies.
+const tokenPurpose = "bmcproxy-handshake-v1|" //nolint:gosec // G101: an HMAC domain-separation label, not a secret
+
+// usedTokens remembers consumed handshake tokens until they would have expired
+// anyway, so a token leaked via logs or Referer can't be replayed.
+type usedTokens struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+// consume records token and reports whether this is its first use.
+func (u *usedTokens) consume(token string) bool {
+	now := time.Now()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for t, exp := range u.seen {
+		if now.After(exp) {
+			delete(u.seen, t)
+		}
+	}
+	if _, dup := u.seen[token]; dup {
+		return false
+	}
+	if u.seen == nil {
+		u.seen = make(map[string]time.Time)
+	}
+	u.seen[token] = now.Add((tokenValiditySeconds + 5) * time.Second)
+	return true
+}
 
 // mintToken signs a short-lived token authorizing a proxy handshake for one
 // iDRAC. It is created by the login-gated initiator on the main host and
@@ -26,8 +59,13 @@ const tokenValiditySeconds = 30
 // session, being a different origin).
 func mintToken(secret []byte, serverID int64) string {
 	ts := time.Now().Unix()
-	sig := hmacHex(secret, fmt.Sprintf("%d:%d", serverID, ts))
-	return base64.URLEncoding.EncodeToString(fmt.Appendf(nil, "%d:%s", ts, sig))
+	// The nonce keeps two launches in the same second distinct, which matters now
+	// that each token is single-use.
+	var nb [8]byte
+	_, _ = rand.Read(nb[:])
+	nonce := hex.EncodeToString(nb[:])
+	sig := hmacHex(secret, fmt.Sprintf("%s%d:%d:%s", tokenPurpose, serverID, ts, nonce))
+	return base64.URLEncoding.EncodeToString(fmt.Appendf(nil, "%d:%s:%s", ts, nonce, sig))
 }
 
 func verifyToken(secret []byte, token string, serverID int64) bool {
@@ -35,7 +73,11 @@ func verifyToken(secret []byte, token string, serverID int64) bool {
 	if err != nil {
 		return false
 	}
-	tsStr, sig, ok := strings.Cut(string(raw), ":")
+	tsStr, rest, ok := strings.Cut(string(raw), ":")
+	if !ok {
+		return false
+	}
+	nonce, sig, ok := strings.Cut(rest, ":")
 	if !ok {
 		return false
 	}
@@ -46,7 +88,7 @@ func verifyToken(secret []byte, token string, serverID int64) bool {
 	if time.Now().Unix()-ts > tokenValiditySeconds {
 		return false
 	}
-	expected := hmacHex(secret, fmt.Sprintf("%d:%d", serverID, ts))
+	expected := hmacHex(secret, fmt.Sprintf("%s%d:%d:%s", tokenPurpose, serverID, ts, nonce))
 	return subtle.ConstantTimeCompare([]byte(sig), []byte(expected)) == 1
 }
 

@@ -172,7 +172,7 @@ func pikvmHandshake(t *testing.T, m *Manager, front *httptest.Server, host, quer
 
 func proxyCookieOf(resp *http.Response) *http.Cookie {
 	for _, c := range resp.Cookies() {
-		if c.Name == proxyCookieName {
+		if c.Name == hostProxyCookieName {
 			return c
 		}
 	}
@@ -379,7 +379,7 @@ func TestPikvmSessionReuse(t *testing.T) {
 	if pc == nil || f.loginCount() != 1 {
 		t.Fatalf("first handshake: cookie=%v logins=%d", pc, f.loginCount())
 	}
-	second := pikvmHandshake(t, m, front, host, "&to=terminal", &http.Cookie{Name: proxyCookieName, Value: pc.Value})
+	second := pikvmHandshake(t, m, front, host, "&to=terminal", &http.Cookie{Name: hostProxyCookieName, Value: pc.Value})
 	if second.StatusCode != http.StatusFound || second.Header.Get("Location") != "/extras/webterm/ttyd/" {
 		t.Fatalf("second: status=%d loc=%q", second.StatusCode, second.Header.Get("Location"))
 	}
@@ -394,7 +394,7 @@ func TestPikvmSessionReuse(t *testing.T) {
 		t.Error("reuse must not issue a new proxy cookie")
 	}
 	// A stale/foreign cookie still performs a real login.
-	pikvmHandshake(t, m, front, host, "", &http.Cookie{Name: proxyCookieName, Value: "bogus"})
+	pikvmHandshake(t, m, front, host, "", &http.Cookie{Name: hostProxyCookieName, Value: "bogus"})
 	if f.loginCount() != 2 {
 		t.Errorf("logins = %d, want 2 after an unrecognised cookie", f.loginCount())
 	}
@@ -419,7 +419,7 @@ func TestPikvmSessionReuseRevalidates(t *testing.T) {
 	f.revoked = true // the PiKVM rebooted
 	f.mu.Unlock()
 
-	again := pikvmHandshake(t, m, front, host, "", &http.Cookie{Name: proxyCookieName, Value: pc.Value})
+	again := pikvmHandshake(t, m, front, host, "", &http.Cookie{Name: hostProxyCookieName, Value: pc.Value})
 	if f.loginCount() != 2 {
 		t.Fatalf("logins = %d, want 2 (dead session must not be reused)", f.loginCount())
 	}

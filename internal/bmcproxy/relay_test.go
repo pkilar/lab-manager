@@ -198,7 +198,9 @@ func TestRewriteLocationHandlesPortAndScope(t *testing.T) {
 		{"https://10.0.0.5:443/login", "10.0.0.5", "https://idrac-1.example/login"},     // iDRAC :443 redirect
 		{"https://10.0.0.5:443/login", "10.0.0.5:443", "https://idrac-1.example/login"}, // ip carries port (test-like)
 		{"/relative/path", "10.0.0.5", "/relative/path"},                                // relative: untouched
-		{"https://other.example/x", "10.0.0.5", "https://other.example/x"},              // foreign host: untouched
+		{"https://other.example/x?a=1", "10.0.0.5", "https://idrac-1.example/x?a=1"},    // foreign host: path+query on the proxy host
+		{"//evil.example", "10.0.0.5", "https://idrac-1.example/"},                      // scheme-relative, empty path
+		{"https://[fe80::1]:443/y", "[fe80::1]", "https://idrac-1.example/y"},           // bracketed IPv6 BMC host
 	}
 	for _, c := range cases {
 		resp := &http.Response{Header: http.Header{}}
