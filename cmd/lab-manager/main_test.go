@@ -1,8 +1,19 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A realistic key: `openssl rand -hex 32`, the recipe the docs give.
@@ -216,4 +227,125 @@ func TestCheckMCPToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The 32-character floor applies whenever the key is set, not only in strict
+// mode; unset is still allowed (a random per-boot key is generated).
+func TestCheckSecretKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{"unset is allowed", "", false},
+		{"openssl rand -hex 32", goodSecretKey, false},
+		{"exactly the minimum", strings.Repeat("a", minSecretKeyLen), false},
+		{"one under the minimum", strings.Repeat("a", minSecretKeyLen-1), true},
+		{"placeholder", "abc123", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkSecretKey(tc.key)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkSecretKey(%q) error = %v, wantErr %v", tc.key, err, tc.wantErr)
+			}
+			if err != nil && (!strings.Contains(err.Error(), "LAB_MANAGER_SECRET_KEY") ||
+				(tc.key != "" && strings.Contains(err.Error(), tc.key))) {
+				t.Errorf("error %q should name the variable and not echo the value", err)
+			}
+		})
+	}
+}
+
+// writeSelfSigned writes a throwaway cert/key pair into dir.
+func writeSelfSigned(t *testing.T, dir string) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "lab-manager-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
+
+func TestLoadTLSConfig(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := writeSelfSigned(t, dir)
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.pem")
+
+	t.Run("neither set means plain HTTP", func(t *testing.T) {
+		cfg, err := loadTLSConfig("", "")
+		if err != nil || cfg != nil {
+			t.Fatalf("got cfg=%v err=%v, want nil, nil", cfg, err)
+		}
+	})
+	t.Run("both set serves TLS 1.2+", func(t *testing.T) {
+		cfg, err := loadTLSConfig(cert, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg == nil || len(cfg.Certificates) != 1 || cfg.MinVersion != tls.VersionTLS12 {
+			t.Fatalf("unexpected config %+v", cfg)
+		}
+	})
+	for _, tc := range []struct {
+		name, cert, key, want string
+	}{
+		{"only cert", cert, "", "together"},
+		{"only key", "", key, "together"},
+		{"missing cert file", missing, key, "LAB_MANAGER_TLS_CERT"},
+		{"missing key file", cert, missing, "LAB_MANAGER_TLS_KEY"},
+		{"garbage cert", garbage, key, "loading"},
+		{"garbage key", cert, garbage, "loading"},
+		{"mismatched pair", cert, otherKey(t, dir), "loading"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadTLSConfig(tc.cert, tc.key)
+			if err == nil || cfg != nil {
+				t.Fatalf("got cfg=%v err=%v, want an error", cfg, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q should contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// otherKey writes a key that does not belong to the cert from writeSelfSigned.
+func otherKey(t *testing.T, dir string) string {
+	t.Helper()
+	sub := filepath.Join(dir, "other")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, key := writeSelfSigned(t, sub)
+	return key
 }

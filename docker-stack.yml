@@ -26,6 +26,19 @@ services:
     networks:
       - traefik-public
 
+    # Hardening. `docker stack deploy` honours cap_add, cap_drop and read_only
+    # (docker/cli cli/compose/convert); it IGNORES security_opt (so no
+    # no-new-privileges here) and the service-level `tmpfs:` key (hence the
+    # long-form tmpfs mount under volumes below).
+    # The entrypoint runs as root only to mkdir/chown/chmod /app/instance and
+    # su-exec to PUID:PGID, so it needs exactly these five; each was removed in
+    # turn and the start failed. DAC_READ_SEARCH is what lets root list the 0700
+    # directory it already handed to the app uid on every later start.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, DAC_READ_SEARCH]
+    # Everything the app writes lives in /app/instance (the volume) or /tmp.
+    read_only: true
+
     environment:
       # Persisted session key. Supplied at `docker stack deploy` time from the
       # shell/.env; if empty the app generates a random key per start (sessions
@@ -71,12 +84,18 @@ services:
       # keep it in the Portainer stack environment next to the session key.
       # See README "MCP server for AI agents".
       - LAB_MANAGER_MCP_TOKEN=${LAB_MANAGER_MCP_TOKEN:-}
+      # Soft heap limit a little under the 256M container limit below, so the GC
+      # works harder before the kernel OOM-kills the task.
+      - GOMEMLIMIT=200MiB
 
     volumes:
       # SQLite DB + encryption key. A named volume keeps the data on the pinned
       # node (see placement constraint). To inspect the DB, find it under the
       # volume's mountpoint: `docker volume inspect lab-manager_lab_manager_instance`.
       - lab_manager_instance:/app/instance
+      # Writable scratch space for the read-only root filesystem.
+      - type: tmpfs
+        target: /tmp
 
     healthcheck:
       # /login is unauthenticated and returns 200; busybox wget ships in the image.

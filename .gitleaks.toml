@@ -1,0 +1,21 @@
+# gitleaks configuration. CI scans only the commits a push/PR adds (never full
+# history; an old, rotated session key lives in 771e3ba on purpose).
+title = "lab-manager gitleaks config"
+
+[extend]
+useDefault = true
+
+# Triaged false positives for the generic-api-key rule only, so every other rule
+# still applies to these paths.
+[[allowlists]]
+description = "Throwaway keys, passwords and tokens in Go test fixtures"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^cmd/lab-manager/main_test\.go$''',
+  '''^internal/[a-z]+/[a-z_]+_test\.go$''',
+]
+
+[[allowlists]]
+description = "Vendored, minified xterm.js (high-entropy identifiers, no secrets)"
+targetRules = ["generic-api-key"]
+paths = ['''^internal/web/static/''']

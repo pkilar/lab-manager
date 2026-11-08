@@ -74,6 +74,8 @@ Set these in your environment or create a `.env` file:
 
 ```bash
 # Session-cookie signing key (IMPORTANT!). Generate with: openssl rand -hex 32
+# When set it must be at least 32 characters, or the app refuses to start
+# (strict mode or not). Unset: a random key per boot, sessions don't persist.
 LAB_MANAGER_SECRET_KEY=your-secure-random-key-here
 
 # Fernet key for encrypting stored credentials. Leave UNSET: the app generates
@@ -94,7 +96,53 @@ LAB_MANAGER_BMC_PROXY_DOMAIN=
 # characters; generate with: openssl rand -hex 32. See "MCP server for AI
 # agents" below.
 LAB_MANAGER_MCP_TOKEN=
+
+# Built-in HTTPS on :5000 (disabled by default). Paths to a PEM certificate and
+# key, inside the container. Set BOTH or neither; one alone is a startup error.
+# See "TLS (docker-compose)" below.
+LAB_MANAGER_TLS_CERT=
+LAB_MANAGER_TLS_KEY=
 ```
+
+### TLS (docker-compose)
+
+**The compose deploy serves plain HTTP on :5000 unless you set TLS.** Session
+cookies, the console launch token and, if enabled, the `/mcp` bearer token then
+cross the network in cleartext. Do not expose `/mcp` over plain HTTP on an untrusted
+LAN: either enable the built-in TLS below or front the app with a TLS-terminating
+proxy (the Swarm deploy gets this from Traefik). With a token set and no TLS the app
+logs a startup warning.
+
+Set `LAB_MANAGER_TLS_CERT` and `LAB_MANAGER_TLS_KEY` to a PEM certificate and
+private key and the app serves HTTPS (TLS 1.2 or newer) on :5000 instead of HTTP. The
+pair is loaded at startup, so a missing, unreadable or mismatched file stops the
+app with a clear error rather than failing on the first request. The startup log
+line reports `scheme=https`.
+
+```bash
+# Self-signed cert for a LAN host (adjust the names), readable by PUID:PGID.
+# Browsers will warn until you trust it; use your own CA or Let's Encrypt for
+# anything longer-lived.
+mkdir -p tls
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout tls/key.pem -out tls/cert.pem -days 365 \
+  -subj "/CN=lab.example.lan" -addext "subjectAltName=DNS:lab.example.lan,IP:192.168.1.10"
+chmod 0644 tls/cert.pem && chmod 0640 tls/key.pem
+```
+
+Then uncomment the `./tls:/tls:ro` volume and the two env lines in
+`docker-compose.yml` (or set them in `.env`):
+
+```yaml
+    volumes:
+      - ./tls:/tls:ro
+    environment:
+      - LAB_MANAGER_TLS_CERT=/tls/cert.pem
+      - LAB_MANAGER_TLS_KEY=/tls/key.pem
+```
+
+The container healthcheck, if you add one, must use `https://` and `--no-check-certificate`
+for a self-signed cert.
 
 ### Production Deployment
 
@@ -415,7 +463,16 @@ booting or shutting down. Ask for `check_power_status` afterwards to confirm.
   `PUID`/`PGID` to override (`docker-compose.yml` uses `1000` so the bind-mounted
   `./instance` stays readable from the host). Volumes from older root-run images
   are migrated automatically on first start.
-- SECRET_KEY should be set for production deployments
+- `PUID`/`PGID` must be plain decimal numbers of at most 10 digits. Leading zeros are
+  stripped first, so `00`, `000` and `0` all count as 0, and uid 0 or gid 0 is
+  refused: the container will not run the app as root (`+0`, `-1`, `abc` and empty
+  values are rejected too). `01000` is accepted as `1000`.
+- `LAB_MANAGER_SECRET_KEY` should be set for production deployments, and must be at
+  least 32 characters whenever it is set (`openssl rand -hex 32`); a shorter value is a
+  startup error
+- The container drops all Linux capabilities except the five its entrypoint needs
+  (`CHOWN`, `FOWNER`, `SETUID`, `SETGID`, `DAC_READ_SEARCH`), has a read-only root
+  filesystem with a `tmpfs` `/tmp`, and (compose only) `no-new-privileges`
 - The optional MCP endpoint (`/mcp`) accepts only the `LAB_MANAGER_MCP_TOKEN` bearer
   token and never returns stored credentials; see "MCP server for AI agents"
 

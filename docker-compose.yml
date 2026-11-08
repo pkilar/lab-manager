@@ -7,6 +7,9 @@ services:
     volumes:
       # Persist SQLite database and encryption key
       - ./instance:/app/instance
+      # Optional built-in TLS (see LAB_MANAGER_TLS_CERT below). Mount the cert/key
+      # read-only; they only need to be readable by PUID:PGID.
+      # - ./tls:/tls:ro
     environment:
       # Session-cookie signing key. Generate with: openssl rand -hex 32
       # Optional: if empty, the app generates a random key per boot (sessions won't persist).
@@ -28,9 +31,27 @@ services:
       # When set it must be at least 32 characters (openssl rand -hex 32) or the
       # app refuses to start. See README "MCP server for AI agents".
       - LAB_MANAGER_MCP_TOKEN=${LAB_MANAGER_MCP_TOKEN:-}
+      # Built-in HTTPS on :5000. Plain HTTP unless BOTH are set (one without the
+      # other is a startup error). Uncomment together with the ./tls volume above;
+      # see README "TLS". Without it the session cookie, the console launch token
+      # and the /mcp bearer token all cross the LAN in cleartext.
+      # - LAB_MANAGER_TLS_CERT=/tls/cert.pem
+      # - LAB_MANAGER_TLS_KEY=/tls/key.pem
       # The app runs unprivileged; the entrypoint re-owns ./instance to this
       # uid:gid on start. Default to the usual first host user so the bind-mounted
       # DB and key stay readable from the host (e.g. `sqlite3 instance/servers.db`).
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     restart: unless-stopped
+    # Hardening. The entrypoint runs as root only to mkdir/chown/chmod
+    # /app/instance and su-exec to PUID:PGID, so it needs exactly these five
+    # (each one removed in turn made a start fail; DAC_READ_SEARCH is what lets
+    # root list the 0700 directory it already handed to PUID on the second start).
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, DAC_READ_SEARCH]
+    security_opt:
+      - no-new-privileges:true
+    # Everything the app writes lives in /app/instance (a volume) or /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp

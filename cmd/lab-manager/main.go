@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -47,6 +48,11 @@ func run() error {
 		return err
 	}
 	bmcProxyDomain := os.Getenv("LAB_MANAGER_BMC_PROXY_DOMAIN")
+	// Always enforced, strict or not: a short key is brute-forceable offline from
+	// one session cookie whatever the deploy calls itself. Unset stays allowed.
+	if err := checkSecretKey(os.Getenv("LAB_MANAGER_SECRET_KEY")); err != nil {
+		return err
+	}
 	if err := checkStrictConfig(strict,
 		os.Getenv("LAB_MANAGER_SECRET_KEY"), bmcProxyDomain,
 		os.Getenv("LAB_MANAGER_ENCRYPTION_KEY")); err != nil {
@@ -59,6 +65,19 @@ func run() error {
 	mcpToken := os.Getenv("LAB_MANAGER_MCP_TOKEN")
 	if err := checkMCPToken(mcpToken); err != nil {
 		return err
+	}
+
+	tlsCfg, err := loadTLSConfig(os.Getenv("LAB_MANAGER_TLS_CERT"), os.Getenv("LAB_MANAGER_TLS_KEY"))
+	if err != nil {
+		return err
+	}
+	scheme := "http"
+	if tlsCfg != nil {
+		scheme = "https"
+	} else if mcpToken != "" {
+		slog.Warn("MCP bearer token is served over plain HTTP: it crosses the network in " +
+			"cleartext unless a TLS-terminating proxy such as Traefik fronts the app " +
+			"(or set LAB_MANAGER_TLS_CERT and LAB_MANAGER_TLS_KEY)")
 	}
 
 	// The dir holds the DB and the encryption key; owner-only (MkdirAll leaves an
@@ -106,6 +125,8 @@ func run() error {
 		Handler:           app.Handler(),
 		ReadHeaderTimeout: 15 * time.Second,
 		ReadTimeout:       30 * time.Second,
+		MaxHeaderBytes:    maxHeaderBytes,
+		TLSConfig:         tlsCfg,
 		// WriteTimeout is intentionally unset: /check-all-servers can legitimately
 		// take minutes when several BMCs are slow or unreachable (each protocol
 		// call has its own 30s timeout).
@@ -119,8 +140,13 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("lab-manager listening", "addr", ":5000", "wol_enabled", wolEnabled,
+		slog.Info("lab-manager listening", "addr", ":5000", "scheme", scheme, "wol_enabled", wolEnabled,
 			"bmc_proxy_domain", bmcProxyDomain, "mcp_enabled", mcpToken != "")
+		if tlsCfg != nil {
+			// Certificates come from TLSConfig, so the file arguments stay empty.
+			serveErr <- srv.ListenAndServeTLS("", "")
+			return
+		}
 		serveErr <- srv.ListenAndServe()
 	}()
 
@@ -163,6 +189,42 @@ func run() error {
 // accept. The documented recipe is `openssl rand -hex 32` (64 chars); 32 leaves
 // room for other encodings of 128+ bits while still rejecting a placeholder.
 const minSecretKeyLen = 32
+
+// maxHeaderBytes caps request headers at 64 KiB (net/http's default is 1 MiB).
+const maxHeaderBytes = 64 << 10
+
+// checkSecretKey rejects a LAB_MANAGER_SECRET_KEY that is set but too short.
+// Empty is allowed here (a random per-boot key is generated, with a warning);
+// checkStrictConfig separately demands a key in strict deploys.
+func checkSecretKey(key string) error {
+	if key == "" || len(key) >= minSecretKeyLen {
+		return nil
+	}
+	return fmt.Errorf("LAB_MANAGER_SECRET_KEY is only %d characters, need at least %d "+
+		"(generate with `openssl rand -hex 32`) - it signs session cookies and console tokens",
+		len(key), minSecretKeyLen)
+}
+
+// loadTLSConfig implements the optional built-in TLS listener. Both paths empty
+// means plain HTTP (nil config); exactly one is a startup error; both loads the
+// pair eagerly so a bad file fails at boot rather than on the first handshake.
+func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	switch {
+	case certFile == "" && keyFile == "":
+		return nil, nil
+	case certFile == "" || keyFile == "":
+		return nil, errors.New("LAB_MANAGER_TLS_CERT and LAB_MANAGER_TLS_KEY must be set together " +
+			"(one is set without the other)")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("loading LAB_MANAGER_TLS_CERT/LAB_MANAGER_TLS_KEY: %w", err)
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+	}, nil
+}
 
 // checkStrictConfig refuses to start when a deployment that declares itself
 // production has configuration that would otherwise degrade silently.

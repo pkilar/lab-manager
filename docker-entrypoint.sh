@@ -16,16 +16,34 @@ if [ "$(id -u)" != 0 ]; then
 	exec "$@"
 fi
 
-uid="${PUID:-10001}"
-gid="${PGID:-10001}"
-case "$uid$gid" in
-*[!0-9]*)
-	echo "docker-entrypoint: PUID/PGID must be numeric (got PUID=$uid PGID=$gid)" >&2
-	exit 1
-	;;
-esac
+# Normalize an id: digits only, 1-10 of them, leading zeros stripped (empty after
+# stripping means 0). Without this "00" slipped past a `= 0` test and su-exec
+# treated it as root.
+normalize_id() {
+	name=$1
+	val=$2
+	case "$val" in
+	'' | *[!0-9]*)
+		echo "docker-entrypoint: $name must be a non-negative decimal number (got '$val')" >&2
+		exit 1
+		;;
+	esac
+	if [ "${#val}" -gt 10 ]; then
+		echo "docker-entrypoint: $name has more than 10 digits" >&2
+		exit 1
+	fi
+	val=$(printf '%s' "$val" | sed 's/^0*//')
+	printf '%s' "${val:-0}"
+}
+
+uid=$(normalize_id PUID "${PUID-10001}")
+gid=$(normalize_id PGID "${PGID-10001}")
 if [ "$uid" = 0 ]; then
 	echo "docker-entrypoint: refusing PUID=0; the app must not run as root" >&2
+	exit 1
+fi
+if [ "$gid" = 0 ]; then
+	echo "docker-entrypoint: refusing PGID=0; the app must not run as the root group" >&2
 	exit 1
 fi
 

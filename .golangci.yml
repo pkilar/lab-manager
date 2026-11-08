@@ -17,6 +17,7 @@ linters:
     - unused         # unused code
     - bodyclose      # unclosed HTTP response bodies (this app makes many BMC calls)
     - noctx          # HTTP requests sent without a context
+    - gosec          # security checks; the triaged false positives are excluded by path below
 
   settings:
     errcheck:
@@ -40,12 +41,34 @@ linters:
       - path: internal/store/
         linters:
           - noctx
+      # gosec false positives, triaged. InsecureSkipVerify (BMCs ship self-signed
+      # certs) is annotated //nolint:gosec at each site instead.
+      # G204: ipmitool is exec'd directly (no shell) with validated arguments, and
+      # the password travels in the environment, never argv.
+      - path: internal/(power/power|sol/sol)\.go
+        linters:
+          - gosec
+        text: "G204"
+      # G304: the path is the constant instance-dir key file, not user input.
+      - path: internal/secret/fernet\.go
+        linters:
+          - gosec
+        text: "G304"
+      # G203: the `js` template func escapes json.Marshal output, which is
+      # already safe to embed in a <script> block.
+      - path: internal/web/render\.go
+        linters:
+          - gosec
+        text: "G203"
       # Tests drive httptest servers and t.Fatal on error; these two would be
       # noise rather than signal there.
       - path: _test\.go
         linters:
           - bodyclose
           - noctx
+          # Fixtures write throwaway files with test-friendly modes, read their own
+          # temp paths and embed dummy credentials: G101/G104/G30x are noise there.
+          - gosec
 
 formatters:
   enable:
