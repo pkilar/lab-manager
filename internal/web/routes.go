@@ -30,16 +30,16 @@ func (a *App) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/server/{id}/power/check", a.requireLogin(true, a.handleAPICheckStatus))
 
 	// Console.
-	mux.HandleFunc("GET /server/{id}/console", a.requireLogin(true, a.handleServerConsole))
-	mux.HandleFunc("GET /server/{id}/console/launch", a.requireLogin(true, a.handleConsoleLaunch))
-	mux.HandleFunc("GET /server/{id}/console/manual", a.requireLogin(true, a.handleConsoleManual))
+	mux.HandleFunc("GET /server/{id}/console", noCrossSite(a.requireLogin(true, a.handleServerConsole)))
+	mux.HandleFunc("GET /server/{id}/console/launch", noCrossSite(a.requireLogin(true, a.handleConsoleLaunch)))
+	mux.HandleFunc("GET /server/{id}/console/manual", noCrossSite(a.requireLogin(true, a.handleConsoleManual)))
 
 	// Serial-over-LAN console.
 	mux.HandleFunc("GET /server/{id}/sol/launch", a.requireLogin(true, a.handleSOLLaunch))
 	mux.HandleFunc("GET /server/{id}/sol", a.requireLogin(true, a.handleSOLSocket))
 
 	// iDRAC KVM proxy initiator (no-op when the proxy is disabled).
-	mux.HandleFunc("GET /server/{id}/kvm", a.requireLogin(true, a.handleKVM))
+	mux.HandleFunc("GET /server/{id}/kvm", noCrossSite(a.requireLogin(true, a.handleKVM)))
 
 	// Static assets (vendored xterm.js); not sensitive, no auth needed.
 	mux.Handle("GET /static/", staticHandler())

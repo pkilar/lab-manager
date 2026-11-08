@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/pkilar/lab-manager/internal/model"
 )
@@ -33,6 +34,7 @@ type sessionData struct {
 	CSRF    string  `json:"csrf,omitempty"`
 	IAT     int64   `json:"iat,omitempty"` // unix seconds at login; bounds the session lifetime
 	PV      string  `json:"pv,omitempty"`  // password-version marker; a password change invalidates old sessions
+	SID     string  `json:"sid,omitempty"` // random per-login id; logout revokes it server-side
 	Flashes []Flash `json:"flashes,omitempty"`
 	dirty   bool    // not serialized; set when the session must be re-saved
 }
@@ -44,7 +46,25 @@ const (
 	ctxUser
 )
 
-const sessionCookie = "session"
+const (
+	sessionCookie = "session"
+	// hostSessionCookie is used over HTTPS. The __Host- prefix makes browsers
+	// require Secure + Path=/ + no Domain, so a sibling subdomain (the BMC proxy
+	// hosts live under the same parent) cannot plant a cookie of this name.
+	hostSessionCookie = "__Host-session"
+)
+
+// sessionCookieName picks the cookie name matching the request's scheme.
+func sessionCookieName(r *http.Request) string {
+	if requestScheme(r) == "https" {
+		return hostSessionCookie
+	}
+	return sessionCookie
+}
+
+// maxFlashRunes keeps one flash small: the whole session rides in a cookie and
+// browsers drop one over ~4 KB, which would silently lose the session.
+const maxFlashRunes = 300
 
 // sessionMaxAge is the server-side absolute session lifetime. The cookie itself
 // stays a browser-session cookie (no MaxAge/Expires), so closing the browser
@@ -93,6 +113,16 @@ func (a *App) parseSession(cookie string) *sessionData {
 }
 
 func (s *sessionData) flash(category, message string) {
+	// Messages can embed text from a BMC; drop control characters and cap the length.
+	message = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, message)
+	if rs := []rune(message); len(rs) > maxFlashRunes {
+		message = string(rs[:maxFlashRunes]) + "…"
+	}
 	s.Flashes = append(s.Flashes, Flash{Category: category, Message: message})
 	s.dirty = true
 }
@@ -123,7 +153,14 @@ func (s *sessionData) login(uid, iat int64, pv string) {
 	s.UID = uid
 	s.IAT = iat
 	s.PV = pv
+	s.SID = newSessionID()
 	s.dirty = true
+}
+
+func newSessionID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func (s *sessionData) logout() {
@@ -131,6 +168,7 @@ func (s *sessionData) logout() {
 	s.UID = 0
 	s.IAT = 0
 	s.PV = ""
+	s.SID = ""
 	s.dirty = true
 }
 
@@ -142,6 +180,8 @@ type sessionWriter struct {
 	app     *App
 	sess    *sessionData
 	secure  bool // set the Secure cookie flag (request arrived over HTTPS)
+	name    string
+	legacy  bool // HTTPS request that also carried the plain-HTTP cookie name
 	flushed bool
 	wrote   bool // a status line or body has been written
 }
@@ -175,8 +215,15 @@ func (w *sessionWriter) flushSession() {
 		slog.Error("marshal session", "err", err)
 		return
 	}
-	http.SetCookie(w.ResponseWriter, &http.Cookie{
-		Name:     sessionCookie,
+	if w.legacy {
+		// Expire the pre-__Host- cookie so it does not linger beside the new one.
+		http.SetCookie(w.ResponseWriter, &http.Cookie{
+			Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
+			HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+		})
+	}
+	http.SetCookie(w.ResponseWriter, &http.Cookie{ //nolint:gosec // G124: Secure is set whenever the request is HTTPS
+		Name:     w.name,
 		Value:    w.app.signSession(payload),
 		Path:     "/",
 		HttpOnly: true,
@@ -202,13 +249,18 @@ func (w *sessionWriter) Write(b []byte) (int, error) {
 func (a *App) withSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sess := &sessionData{}
-		if c, err := r.Cookie(sessionCookie); err == nil {
+		name := sessionCookieName(r)
+		if c, err := r.Cookie(name); err == nil {
 			sess = a.parseSession(c.Value)
 		}
 		// Set the Secure flag only when the request arrived over HTTPS (directly
 		// or via a TLS-terminating proxy like Traefik). The app is also served
 		// over plain HTTP on the LAN, where Secure would drop the cookie.
-		sw := &sessionWriter{ResponseWriter: w, app: a, sess: sess, secure: requestScheme(r) == "https"}
+		sw := &sessionWriter{ResponseWriter: w, app: a, sess: sess, secure: requestScheme(r) == "https", name: name}
+		if name != sessionCookie {
+			_, err := r.Cookie(sessionCookie)
+			sw.legacy = err == nil
+		}
 		// Recover panics from downstream handlers here, where the sessionWriter
 		// (which tracks whether a response was written) is in scope. A leaked
 		// stack trace is never sent to the client.
@@ -267,11 +319,22 @@ func (a *App) requireLogin(enforcePasswordGate bool, h http.HandlerFunc) http.Ha
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
-		// Cookies without iat predate expiry support; treat them as expired.
-		if sess.IAT == 0 || a.now().After(time.Unix(sess.IAT, 0).Add(sessionMaxAge)) ||
+		// Cookies without iat or sid predate those features; treat them as expired.
+		if sess.IAT == 0 || sess.SID == "" || a.now().After(time.Unix(sess.IAT, 0).Add(sessionMaxAge)) ||
 			!hmac.Equal([]byte(sess.PV), []byte(a.passwordVersion(user.PasswordHash))) {
 			sess.logout()
 			sess.flash("warning", "Your session has expired. Please log in again.")
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		revoked, err := a.store.SessionRevoked(sess.SID)
+		if err != nil {
+			// Fail closed: an unreadable revocation list must not admit a revoked session.
+			a.serverError(w, r, err)
+			return
+		}
+		if revoked {
+			sess.logout()
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}

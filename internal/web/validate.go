@@ -14,9 +14,30 @@ var (
 	unsafeChars = regexp.MustCompile(`[<>"'&]`)
 )
 
-// validateIPAddress reports whether s is a valid IPv4 or IPv6 address.
+// validateIPAddress reports whether s is a usable BMC address. See ipAddressError.
 func validateIPAddress(s string) bool {
-	return net.ParseIP(strings.TrimSpace(s)) != nil
+	return ipAddressError(s) == ""
+}
+
+// ipAddressError explains why s cannot be a BMC address, or returns "". IPv6 and
+// link-local addresses are accepted (BMCs can live there). Unspecified,
+// loopback, multicast and the limited broadcast are refused: the app would dial
+// itself or a broadcast group instead of a BMC.
+func ipAddressError(s string) string {
+	ip := net.ParseIP(strings.TrimSpace(s))
+	switch {
+	case ip == nil:
+		return "Invalid IP address format"
+	case ip.IsUnspecified():
+		return "IP address must not be the unspecified address (0.0.0.0 or ::)"
+	case ip.IsLoopback():
+		return "IP address must not be a loopback address"
+	case ip.IsMulticast():
+		return "IP address must not be a multicast address"
+	case ip.Equal(net.IPv4bcast):
+		return "IP address must not be the broadcast address"
+	}
+	return ""
 }
 
 // validateMACAddress reports whether s is a valid MAC address. An empty string

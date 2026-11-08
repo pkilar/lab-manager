@@ -109,7 +109,7 @@ func TestSessionSignRoundTrip(t *testing.T) {
 }
 
 func TestValidation(t *testing.T) {
-	if !validateIPAddress("192.168.1.1") || !validateIPAddress("::1") {
+	if !validateIPAddress("192.168.1.1") || !validateIPAddress("2001:db8::1") || !validateIPAddress("fe80::1") {
 		t.Error("valid IPs rejected")
 	}
 	if validateIPAddress("999.1.1.1") || validateIPAddress("nope") {

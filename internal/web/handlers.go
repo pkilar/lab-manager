@@ -67,12 +67,13 @@ func actionToCommand(action string) (string, bool) {
 // X-Forwarded-Proto so console launch URLs and the Secure cookie flag are
 // correct behind Traefik.
 func requestScheme(r *http.Request) string {
+	// Direct TLS is authoritative: a client cannot downgrade it with a header.
+	if r.TLS != nil {
+		return "https"
+	}
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		first, _, _ := strings.Cut(proto, ",")
 		return strings.ToLower(strings.TrimSpace(first))
-	}
-	if r.TLS != nil {
-		return "https"
 	}
 	return "http"
 }
@@ -136,11 +137,12 @@ func parseServerForm(r *http.Request) (serverForm, string) {
 	}
 	solInstance, solOK := parseSOLInstance(r.PostFormValue("sol_instance"))
 	f.SOLInstance = solInstance
+	ipErr := ipAddressError(f.IPAddress)
 	switch {
 	case f.Name == "":
 		return f, "Server name is required"
-	case !validateIPAddress(f.IPAddress):
-		return f, "Invalid IP address format"
+	case ipErr != "":
+		return f, ipErr
 	case f.MAC != "" && !validateMACAddress(f.MAC):
 		return f, "Invalid MAC address format (use AA:BB:CC:DD:EE:FF)"
 	case !solOK:
@@ -505,6 +507,8 @@ func (a *App) handleServerConsole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := a.console.GenerateToken(id, currentUser(r).ID)
+	// The body carries a console token URL; keep it out of any cache.
+	w.Header().Set("Cache-Control", "no-store")
 	launchURL := requestScheme(r) + "://" + r.Host + "/server/" + strconv.FormatInt(id, 10) +
 		"/console/launch?token=" + url.QueryEscape(token)
 	writeJSON(w, http.StatusOK, consoleLaunchResponse{
@@ -577,10 +581,37 @@ func (a *App) handleConsoleLaunch(w http.ResponseWriter, r *http.Request) {
 
 // ---- auth ----------------------------------------------------------------
 
+// busy answers a request that could not get a scrypt slot in time.
+func (a *App) busy(w http.ResponseWriter, r *http.Request, page string) {
+	w.Header().Set("Retry-After", "1")
+	requestSession(r).flash("error", "Server busy, please try again in a moment.")
+	a.renderPage(w, page, http.StatusServiceUnavailable, simplePage{a.baseData(r)})
+}
+
+// scrypt runs fn while holding a slot of the scrypt gate. It reports false,
+// without running fn, when no slot freed up in time or the request ended.
+func (a *App) scrypt(r *http.Request, fn func()) bool {
+	release, ok := a.loginLimit.gate.acquire(r.Context())
+	if !ok {
+		return false
+	}
+	defer release()
+	fn()
+	return true
+}
+
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		username := strings.TrimSpace(r.PostFormValue("username"))
 		password := r.PostFormValue("password")
+
+		// An oversized username is never looked up, hashed or remembered: it must
+		// not become a limiter key.
+		if len(username) > maxUsernameBytes {
+			requestSession(r).flash("error", "Invalid username or password")
+			a.renderPage(w, "login", http.StatusOK, simplePage{a.baseData(r)})
+			return
+		}
 
 		now := a.now()
 		key := loginKey(username)
@@ -590,13 +621,30 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 			a.renderPage(w, "login", http.StatusTooManyRequests, simplePage{a.baseData(r)})
 			return
 		}
+		// Every admitted attempt below ends in fail, succeed or abort.
+		if len(password) > maxPasswordBytes {
+			a.loginLimit.fail(key, now)
+			requestSession(r).flash("error", "Invalid username or password")
+			a.renderPage(w, "login", http.StatusOK, simplePage{a.baseData(r)})
+			return
+		}
 
 		// Always run one scrypt verification, even for unknown usernames, so
 		// response time does not reveal which usernames exist.
 		user, err := a.store.GetUserByUsername(username)
-		if err != nil {
-			secret.CheckPasswordHash(dummyPasswordHash(), password)
-		} else if secret.CheckPasswordHash(user.PasswordHash, password) {
+		valid := false
+		if !a.scrypt(r, func() {
+			if err != nil {
+				secret.CheckPasswordHash(dummyPasswordHash(), password)
+			} else {
+				valid = secret.CheckPasswordHash(user.PasswordHash, password)
+			}
+		}) {
+			a.loginLimit.abort(key)
+			a.busy(w, r, "login")
+			return
+		}
+		if valid {
 			a.loginLimit.succeed(key)
 			sess := requestSession(r)
 			sess.login(user.ID, now.Unix(), a.passwordVersion(user.PasswordHash))
@@ -621,12 +669,37 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		newPassword := r.PostFormValue("new_password")
 		confirm := r.PostFormValue("confirm_password")
 
-		switch {
-		case !secret.CheckPasswordHash(user.PasswordHash, current):
+		// The current-password check is a guessing oracle for anyone holding a
+		// session, so it is throttled per user (not per username: separate map).
+		now := a.now()
+		key := strconv.FormatInt(user.ID, 10)
+		if ok, retry := a.loginLimit.pw.allow(key, now); !ok {
+			secs := int((retry + time.Second - 1) / time.Second)
+			requestSession(r).flash("error", fmt.Sprintf("Too many failed attempts. Try again in %d seconds.", secs))
+			a.renderPage(w, "change_password", http.StatusTooManyRequests, simplePage{a.baseData(r)})
+			return
+		}
+		currentOK := false
+		if len(current) <= maxPasswordBytes {
+			if !a.scrypt(r, func() { currentOK = secret.CheckPasswordHash(user.PasswordHash, current) }) {
+				a.loginLimit.pw.abort(key)
+				a.busy(w, r, "change_password")
+				return
+			}
+		}
+		if !currentOK {
+			a.loginLimit.pw.fail(key, now)
 			a.flashSimple(w, r, "change_password", "error", "Current password is incorrect")
 			return
+		}
+		a.loginLimit.pw.succeed(key)
+
+		switch {
 		case len([]rune(newPassword)) < 8:
 			a.flashSimple(w, r, "change_password", "error", "New password must be at least 8 characters long")
+			return
+		case len(newPassword) > maxPasswordBytes:
+			a.flashSimple(w, r, "change_password", "error", fmt.Sprintf("New password must be at most %d bytes long", maxPasswordBytes))
 			return
 		case newPassword != confirm:
 			a.flashSimple(w, r, "change_password", "error", "New passwords do not match")
@@ -636,7 +709,12 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		hash, err := secret.GeneratePasswordHash(newPassword)
+		var hash string
+		var err error
+		if !a.scrypt(r, func() { hash, err = secret.GeneratePasswordHash(newPassword) }) {
+			a.busy(w, r, "change_password")
+			return
+		}
 		if err != nil {
 			a.serverError(w, r, err)
 			return
@@ -657,7 +735,15 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
-	requestSession(r).logout()
+	sess := requestSession(r)
+	// Revoke the sid server-side: clearing the cookie alone leaves a copy of it
+	// valid until it expires. The record only needs to outlive the session.
+	if sess.SID != "" {
+		if err := a.store.RevokeSession(sess.SID, time.Unix(sess.IAT, 0).Add(sessionMaxAge)); err != nil {
+			slog.Error("revoke session", "err", err)
+		}
+	}
+	sess.logout()
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 

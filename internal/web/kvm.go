@@ -38,5 +38,5 @@ func (a *App) handleKVM(w http.ResponseWriter, r *http.Request) {
 		target = bmcproxy.TargetTerminal
 	}
 	token := a.proxy.MintToken(id)
-	http.Redirect(w, r, a.proxy.AuthURL(requestScheme(r), r.Host, s.BMCType, id, token, target), http.StatusFound)
+	http.Redirect(w, r, a.proxy.AuthURL(requestScheme(r), r.Host, s.BMCType, id, token, target), http.StatusFound) //nolint:gosec // G710: AuthURL builds <vendor>-<id>.<configured domain>; only the port comes from the request
 }

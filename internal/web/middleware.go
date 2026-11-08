@@ -35,3 +35,19 @@ func limitRequestBody(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// noCrossSite refuses requests the browser marks as cross-site. The session
+// cookie is SameSite=Lax, so a hostile page can still top-level-navigate a
+// logged-in user to a GET route; for routes with side effects on a BMC (token
+// minting, proxy login) that must not work. same-site stays allowed: the BMC
+// proxy host bounces expired sessions back to the main host, which browsers
+// label same-site. A missing header (old browsers, curl) is allowed.
+func noCrossSite(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	}
+}

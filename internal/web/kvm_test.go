@@ -56,6 +56,13 @@ func TestKVMInitiatorRedirectsToProxySubdomain(t *testing.T) {
 	// httptest listener necessarily carries a port.)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/server/1/kvm", nil)
 	req.Header.Set("X-Forwarded-Proto", "https")
+	// The HTTPS request reads the __Host- cookie name, so present the session under it.
+	su, _ := url.Parse(srv.URL)
+	for _, ck := range c.Jar.Cookies(su) {
+		if ck.Name == sessionCookie {
+			req.AddCookie(&http.Cookie{Name: hostSessionCookie, Value: ck.Value})
+		}
+	}
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
