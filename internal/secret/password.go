@@ -28,10 +28,10 @@ const (
 
 // Upper bounds on cost parameters read back from a stored hash.
 const (
-	maxScryptN    = 1 << 20
-	maxScryptR    = 32
-	maxScryptP    = 16
-	maxPBKDF2Iter = 10_000_000
+	maxScryptN    = 1 << 17
+	maxScryptR    = 16
+	maxScryptP    = 4
+	maxPBKDF2Iter = 2_000_000
 )
 
 const saltAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -80,9 +80,7 @@ func CheckPasswordHash(stored, password string) bool {
 		if err1 != nil || err2 != nil || err3 != nil {
 			return false
 		}
-		// Bound the stored cost parameters so a tampered row can't make
-		// verification allocate gigabytes or spin for minutes.
-		if n < 2 || n > maxScryptN || n&(n-1) != 0 || r < 1 || r > maxScryptR || p < 1 || p > maxScryptP {
+		if !scryptCostOK(n, r, p) {
 			return false
 		}
 		dk, err := scrypt.Key([]byte(password), []byte(salt), n, r, p, len(want))
@@ -97,7 +95,7 @@ func CheckPasswordHash(stored, password string) bool {
 			return false
 		}
 		iter, err := strconv.Atoi(parts[2])
-		if err != nil || iter < 1 || iter > maxPBKDF2Iter {
+		if err != nil || !pbkdf2CostOK(iter) {
 			return false
 		}
 		dk, err := pbkdf2.Key(sha256.New, password, []byte(salt), iter, len(want))
@@ -112,6 +110,16 @@ func CheckPasswordHash(stored, password string) bool {
 
 	return hmac.Equal(got, want)
 }
+
+// scryptCostOK and pbkdf2CostOK bound the cost parameters read back from a
+// stored hash, so a tampered row can't make verification allocate gigabytes or
+// spin for minutes.
+func scryptCostOK(n, r, p int) bool {
+	return n >= 2 && n <= maxScryptN && n&(n-1) == 0 &&
+		r >= 1 && r <= maxScryptR && p >= 1 && p <= maxScryptP
+}
+
+func pbkdf2CostOK(iter int) bool { return iter >= 1 && iter <= maxPBKDF2Iter }
 
 func randomSalt(n int) (string, error) {
 	b := make([]byte, n)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +57,112 @@ func Open(dbPath string, cipher *secret.Fernet) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := st.encryptLegacyCredentials(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	restrictDBFile(dbPath)
 	return st, nil
+}
+
+// restrictDBFile chmods a real database file to 0600 (the driver creates it
+// 0644 under a normal umask). The journal inherits the main file's mode. A
+// failure only warns: a read-only mount must not stop startup.
+func restrictDBFile(dbPath string) {
+	if dbPath == "" || dbPath == ":memory:" || strings.HasPrefix(dbPath, "file::memory:") || strings.Contains(dbPath, "mode=memory") {
+		return
+	}
+	path := strings.TrimPrefix(dbPath, "file:")
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		slog.Warn("could not restrict database file permissions", "path", path, "err", err)
+	}
+}
+
+// encryptLegacyCredentials encrypts, in one transaction, any credential still
+// stored as plaintext. Values that decrypt are already encrypted, and
+// token-shaped values that don't are a wrong-key token: both are left alone so
+// nothing is ever double-encrypted. Idempotent; logs ids only, never values.
+func (st *Store) encryptLegacyCredentials() error {
+	tx, err := st.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	type fix struct {
+		id         int64
+		column, tk string
+	}
+	var fixes []fix
+	wrongKey := false
+	rows, err := tx.Query("SELECT id, redfish_password, ipmi_password FROM server")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var rf, ipmi sql.NullString
+		if err := rows.Scan(&id, &rf, &ipmi); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		for _, c := range []struct {
+			col string
+			v   sql.NullString
+		}{{"redfish_password", rf}, {"ipmi_password", ipmi}} {
+			if c.v.String == "" {
+				continue
+			}
+			if _, err := st.cipher.Decrypt(c.v.String); err == nil {
+				continue
+			}
+			if looksLikeFernet(c.v.String) {
+				wrongKey = true
+				continue
+			}
+			tok, err := st.cipher.Encrypt([]byte(c.v.String))
+			if err != nil {
+				_ = rows.Close()
+				return err
+			}
+			fixes = append(fixes, fix{id, c.col, tok})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	if len(fixes) == 0 {
+		return nil
+	}
+	if wrongKey {
+		// Some tokens don't decrypt, so this is probably not the key they were
+		// written with (e.g. a lost key file was regenerated). Encrypting the
+		// plaintext now would bind it to that key, and restoring the right key
+		// would then lose it too. Leave everything as it is until the key is
+		// sorted out.
+		slog.Warn("legacy plaintext credentials left unencrypted: other stored credentials don't decrypt with the current key",
+			"count", len(fixes))
+		return nil
+	}
+
+	ids := make([]int64, 0, len(fixes))
+	for _, f := range fixes {
+		// f.column is one of two package-internal constants.
+		if _, err := tx.Exec("UPDATE server SET "+f.column+" = ? WHERE id = ?", f.tk, f.id); err != nil { //nolint:gosec // G202: column is a constant, values are bound
+			return err
+		}
+		ids = append(ids, f.id)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	slog.Warn("encrypted legacy plaintext credentials", "count", len(fixes), "server_ids", ids)
+	return nil
 }
 
 // Close releases the underlying database handle.
@@ -88,6 +194,10 @@ CREATE TABLE IF NOT EXISTS user (
 	username TEXT NOT NULL UNIQUE,
 	password_hash TEXT NOT NULL,
 	password_change_required INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS revoked_session (
+	sid TEXT PRIMARY KEY,
+	expires DATETIME NOT NULL
 );`
 	if _, err := st.db.Exec(schema); err != nil {
 		return fmt.Errorf("create tables: %w", err)
@@ -172,23 +282,26 @@ func (st *Store) warnOnce(serverID int64, column string) {
 	}
 }
 
-func (st *Store) decryptCredential(serverID int64, column, ciphertext string) string {
+// decryptCredential returns a stored credential's plaintext, and unreadable =
+// true when the value is shaped like a Fernet token but does not decrypt.
+func (st *Store) decryptCredential(serverID int64, column, ciphertext string) (plaintext string, unreadable bool) {
 	if ciphertext == "" {
-		return ""
+		return "", false
 	}
 	pt, err := st.cipher.Decrypt(ciphertext)
 	if err != nil {
-		// Not a valid Fernet token — treat as a legacy plaintext credential
-		// stored before encryption was introduced (return it unchanged). A value
-		// that is shaped like a token, though, means the key was lost or
-		// swapped: flag it (never the value) so the cause of BMC auth failures
-		// is visible.
 		if looksLikeFernet(ciphertext) {
+			// The key was lost or swapped. Flag it (never the value) and return
+			// nothing: handing the token to a BMC as a password would only rack
+			// up failed logins and can lock the account.
 			st.warnOnce(serverID, column)
+			return "", true
 		}
-		return ciphertext
+		// Not token-shaped: a legacy plaintext credential stored before
+		// encryption was introduced.
+		return ciphertext, false
 	}
-	return string(pt)
+	return string(pt), false
 }
 
 func (st *Store) encryptCredential(plaintext string) (any, error) {
@@ -223,9 +336,11 @@ func (st *Store) scanServer(sc scanner) (*model.Server, error) {
 		s.BMCType = model.BMCGeneric
 	}
 	s.RedfishUser = rfUser.String
-	s.RedfishPassword = st.decryptCredential(s.ID, "redfish_password", rfPass.String)
+	var rfBad, ipmiBad bool
+	s.RedfishPassword, rfBad = st.decryptCredential(s.ID, "redfish_password", rfPass.String)
 	s.IPMIUser = ipmiUser.String
-	s.IPMIPassword = st.decryptCredential(s.ID, "ipmi_password", ipmiPass.String)
+	s.IPMIPassword, ipmiBad = st.decryptCredential(s.ID, "ipmi_password", ipmiPass.String)
+	s.CredentialsUnreadable = rfBad || ipmiBad
 	s.MACAddress = mac.String
 	s.Status = status.String
 	s.Notes = notes.String
@@ -320,7 +435,7 @@ func (st *Store) UpdateServer(s *model.Server, setRedfishPw, setIPMIPw bool) err
 		args = append(args, enc)
 	}
 	args = append(args, s.ID)
-	_, err := st.db.Exec("UPDATE server SET "+strings.Join(set, ", ")+" WHERE id = ?", args...)
+	_, err := st.db.Exec("UPDATE server SET "+strings.Join(set, ", ")+" WHERE id = ?", args...) //nolint:gosec // G202: set holds constant fragments, values are bound
 	return err
 }
 
@@ -381,6 +496,27 @@ func (st *Store) SetUserPassword(id int64, hash string, changeRequired bool) err
 		hash, boolToInt(changeRequired), id,
 	)
 	return err
+}
+
+// ---- session revocation --------------------------------------------------
+
+// RevokeSession records that the login session sid was ended (logout), so a
+// copy of its cookie is refused until expires, the session's own expiry. Rows
+// past their expiry are dropped on the way, which keeps the table bounded by
+// the number of logouts in one session lifetime.
+func (st *Store) RevokeSession(sid string, expires time.Time) error {
+	if _, err := st.db.Exec("DELETE FROM revoked_session WHERE expires < ?", formatDBTime(time.Now())); err != nil {
+		return err
+	}
+	_, err := st.db.Exec("INSERT OR REPLACE INTO revoked_session (sid, expires) VALUES (?, ?)", sid, formatDBTime(expires))
+	return err
+}
+
+// SessionRevoked reports whether sid was revoked by RevokeSession.
+func (st *Store) SessionRevoked(sid string) (bool, error) {
+	var n int
+	err := st.db.QueryRow("SELECT count(*) FROM revoked_session WHERE sid = ?", sid).Scan(&n)
+	return n > 0, err
 }
 
 // InitDefaultUser creates the default admin/admin account on first startup,

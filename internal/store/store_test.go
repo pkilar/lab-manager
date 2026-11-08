@@ -1,9 +1,11 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pkilar/lab-manager/internal/model"
 	"github.com/pkilar/lab-manager/internal/secret"
@@ -34,14 +36,14 @@ func TestDecryptCredentialLegacyPlaintextFallback(t *testing.T) {
 	st := &Store{cipher: testFernet(t)}
 	// The shipped DB stores plaintext credentials like "calvin"; they are not
 	// valid Fernet tokens and must be returned verbatim.
-	if got := st.decryptCredential(1, "c", "calvin"); got != "calvin" {
+	if got, bad := st.decryptCredential(1, "c", "calvin"); got != "calvin" || bad {
 		t.Fatalf("legacy plaintext = %q, want calvin", got)
 	}
-	if got := st.decryptCredential(1, "c", ""); got != "" {
+	if got, bad := st.decryptCredential(1, "c", ""); got != "" || bad {
 		t.Fatalf("empty = %q, want empty", got)
 	}
 	tok, _ := st.cipher.Encrypt([]byte("encrypted"))
-	if got := st.decryptCredential(1, "c", tok); got != "encrypted" {
+	if got, bad := st.decryptCredential(1, "c", tok); got != "encrypted" || bad {
 		t.Fatalf("fernet round-trip via store = %q, want encrypted", got)
 	}
 }
@@ -223,8 +225,8 @@ func TestUndecryptableFernetTokenWarnsOncePerColumn(t *testing.T) {
 	st := &Store{cipher: testFernet(t)}
 
 	for range 3 {
-		if got := st.decryptCredential(7, "redfish_password", tok); got != tok {
-			t.Fatalf("fallback must return the raw value, got %q", got)
+		if got, bad := st.decryptCredential(7, "redfish_password", tok); got != "" || !bad {
+			t.Fatalf("wrong-key token must be empty+unreadable, got %q, %v", got, bad)
 		}
 	}
 	if len(warns) != 1 {
@@ -245,11 +247,154 @@ func TestLegacyPlaintextDoesNotWarn(t *testing.T) {
 
 	st := &Store{cipher: testFernet(t)}
 	for _, v := range []string{"calvin", "p@ss word", strings.Repeat("A", 120)} {
-		if got := st.decryptCredential(1, "redfish_password", v); got != v {
+		if got, bad := st.decryptCredential(1, "redfish_password", v); got != v || bad {
 			t.Fatalf("plaintext %q altered to %q", v, got)
 		}
 	}
 	if n != 0 {
 		t.Fatalf("plaintext triggered %d warnings", n)
+	}
+}
+
+func TestCredentialsUnreadableWithWrongKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "servers.db")
+	st, err := Open(path, testFernet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &model.Server{Name: "a", IPAddress: "10.0.0.1", RedfishUser: "root", RedfishPassword: "calvin", Status: "Off"}
+	if err := st.CreateServer(s); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	other, err := secret.NewFernet([]byte("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st2, err := Open(path, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st2.Close() })
+	got, err := st2.GetServer(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RedfishPassword != "" || !got.CredentialsUnreadable {
+		t.Fatalf("password=%q unreadable=%v, want empty+true", got.RedfishPassword, got.CredentialsUnreadable)
+	}
+	// Open must not have re-encrypted the wrong-key token.
+	var raw string
+	_ = st2.db.QueryRow("SELECT redfish_password FROM server WHERE id=?", s.ID).Scan(&raw)
+	if _, err := testFernet(t).Decrypt(raw); err != nil {
+		t.Fatalf("stored token was altered by the other-key open: %v", err)
+	}
+}
+
+func TestRevokeSessionAndPrune(t *testing.T) {
+	st := openTempStore(t)
+	if r, err := st.SessionRevoked("a"); err != nil || r {
+		t.Fatalf("unknown sid revoked=%v err=%v", r, err)
+	}
+	if err := st.RevokeSession("old", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RevokeSession("a", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := st.SessionRevoked("a"); !r {
+		t.Fatal("a should be revoked")
+	}
+	if r, _ := st.SessionRevoked("old"); r {
+		t.Fatal("expired row should have been pruned by the later RevokeSession")
+	}
+}
+
+func TestOpenEncryptsLegacyPlaintextIdempotently(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "servers.db")
+	st, err := Open(path, testFernet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, _ := testFernet(t).Encrypt([]byte("already"))
+	if _, err := st.db.Exec(`INSERT INTO server (id,name,ip_address,redfish_password,ipmi_password) VALUES
+		(1,'a','1.1.1.1','calvin',NULL), (2,'b','1.1.1.2','',?)`, own); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	for range 2 { // second open proves idempotence
+		st, err = Open(path, testFernet(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rf, ip string
+		_ = st.db.QueryRow("SELECT redfish_password FROM server WHERE id=1").Scan(&rf)
+		_ = st.db.QueryRow("SELECT ipmi_password FROM server WHERE id=2").Scan(&ip)
+		if rf == "calvin" {
+			t.Fatal("plaintext not encrypted")
+		}
+		if pt, err := testFernet(t).Decrypt(rf); err != nil || string(pt) != "calvin" {
+			t.Fatalf("decrypt = %q, %v", pt, err)
+		}
+		if ip != own {
+			t.Fatal("an already-encrypted value was re-encrypted")
+		}
+		_ = st.Close()
+	}
+}
+
+// A token that doesn't decrypt means the current key is probably wrong (e.g. a
+// lost key file was regenerated). Encrypting plaintext under that key would
+// make it unrecoverable once the right key is restored, so nothing changes.
+func TestOpenLeavesPlaintextAloneUnderWrongKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "servers.db")
+	st, err := Open(path, testFernet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := secret.NewFernet([]byte("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="))
+	foreign, _ := other.Encrypt([]byte("x"))
+	if _, err := st.db.Exec(`INSERT INTO server (id,name,ip_address,redfish_password,ipmi_password) VALUES
+		(1,'a','1.1.1.1','calvin',NULL), (2,'b','1.1.1.2','',?)`, foreign); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	st, err = Open(path, testFernet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	var rf, ip string
+	_ = st.db.QueryRow("SELECT redfish_password FROM server WHERE id=1").Scan(&rf)
+	_ = st.db.QueryRow("SELECT ipmi_password FROM server WHERE id=2").Scan(&ip)
+	if rf != "calvin" {
+		t.Fatal("plaintext was encrypted under a key that doesn't match the other tokens")
+	}
+	if ip != foreign {
+		t.Fatal("wrong-key token was modified")
+	}
+}
+
+func TestOpenRestrictsDBFileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "servers.db")
+	st, err := Open(path, testFernet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(path, testFernet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	fi, _ := os.Stat(path)
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o, want 600", fi.Mode().Perm())
 	}
 }

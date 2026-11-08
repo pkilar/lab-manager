@@ -110,7 +110,7 @@ func (f *Fernet) encryptAt(plaintext, iv []byte, ts int64) (string, error) {
 	body := make([]byte, 0, 1+8+len(iv)+len(ciphertext)+sha256.Size)
 	body = append(body, fernetVersion)
 	for i := 7; i >= 0; i-- {
-		body = append(body, byte(ts>>(8*uint(i))))
+		body = append(body, byte(ts>>(8*uint(i)))) //nolint:gosec // G115: deliberate truncation, one big-endian byte at a time
 	}
 	body = append(body, iv...)
 	body = append(body, ciphertext...)
@@ -127,7 +127,7 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 	out := make([]byte, len(data)+pad)
 	copy(out, data)
 	for i := len(data); i < len(out); i++ {
-		out[i] = byte(pad)
+		out[i] = byte(pad) //nolint:gosec // G115: pad is 1..blockSize (16)
 	}
 	return out
 }
@@ -161,9 +161,11 @@ func LoadEncryptionKey(instanceDir string) ([]byte, error) {
 	}
 
 	keyFile := filepath.Join(instanceDir, ".encryption_key")
+	tightenMode(instanceDir, 0o700)
 	b, err := os.ReadFile(keyFile)
 	switch {
 	case err == nil:
+		tightenMode(keyFile, 0o600)
 		return validateKeyFile(keyFile, b)
 	case !errors.Is(err, fs.ErrNotExist):
 		// Never generate over a key we merely failed to read: replacing it
@@ -211,6 +213,20 @@ func LoadEncryptionKey(instanceDir string) ([]byte, error) {
 	}
 	slog.Warn("generated new encryption key", "path", keyFile)
 	return encoded, nil
+}
+
+// tightenMode chmods an existing path to mode when it grants any group/other
+// access (MkdirAll and WriteFile only apply a mode on creation). Failure warns
+// and carries on: a readable key must still load, e.g. on a read-only mount.
+func tightenMode(path string, mode os.FileMode) {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	slog.Warn("permissions too open on secret material; tightening", "path", path, "mode", fi.Mode().Perm().String(), "want", mode.String())
+	if err := os.Chmod(path, mode); err != nil {
+		slog.Warn("could not tighten permissions", "path", path, "err", err)
+	}
 }
 
 // validateKeyFile checks the contents of an existing key file. An invalid file

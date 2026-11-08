@@ -2,7 +2,10 @@
 // Server and User records and the BMC vendor taxonomy.
 package model
 
-import "time"
+import (
+	"net"
+	"time"
+)
 
 // BMC vendor types. These exact string values are persisted in the database.
 const (
@@ -64,6 +67,34 @@ type Server struct {
 	// means "not set" (rows written before the column existed). Read it through
 	// SOLInstanceOrDefault rather than directly.
 	SOLInstance int
+	// CredentialsUnreadable is set by the store when a stored password is
+	// shaped like an encrypted token but does not decrypt (lost or swapped
+	// encryption key). That password field is then empty, and callers must not
+	// contact the BMC: a ciphertext sent as a password only racks up failed
+	// logins and can lock the BMC account.
+	CredentialsUnreadable bool
+}
+
+// BMCHost returns the server's address formatted for the host part of a URL:
+// the canonical IP, with an IPv6 literal bracketed. ok is false when the stored
+// value is not an IP address, so a row that bypassed form validation is never
+// used to build a URL.
+func (s *Server) BMCHost() (host string, ok bool) {
+	ip := net.ParseIP(s.IPAddress)
+	if ip == nil {
+		return "", false
+	}
+	if ip.To4() == nil {
+		return "[" + ip.String() + "]", true
+	}
+	return ip.String(), true
+}
+
+// ValidIP reports whether the stored address is an IP literal. Callers that
+// hand the address to ipmitool (which takes IPv6 unbracketed) check it here
+// rather than trusting that every row came through the web form.
+func (s *Server) ValidIP() bool {
+	return net.ParseIP(s.IPAddress) != nil
 }
 
 // SOLInstanceOrDefault returns the serial console's payload instance, falling
