@@ -410,3 +410,51 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestSessionCapAndRelease(t *testing.T) {
+	m := &Manager{run: &fakeRunner{}}
+	srv := &model.Server{IPAddress: "10.0.0.5", RedfishUser: "root", RedfishPassword: "calvin"}
+	var sessions []*Session
+	for i := range maxSessions {
+		s, err := m.Start(t.Context(), srv)
+		if err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+		sessions = append(sessions, s)
+	}
+	if _, err := m.Start(t.Context(), srv); err != ErrTooManySessions {
+		t.Fatalf("Start at cap = %v, want ErrTooManySessions", err)
+	}
+	// Close is idempotent: a second call must not free a second slot.
+	_ = sessions[0].Close()
+	_ = sessions[0].Close()
+	if got := m.liveCount(); got != maxSessions-1 {
+		t.Fatalf("live after one close = %d, want %d", got, maxSessions-1)
+	}
+	s, err := m.Start(t.Context(), srv)
+	if err != nil {
+		t.Fatalf("Start after release: %v", err)
+	}
+	if _, err := m.Start(t.Context(), srv); err != ErrTooManySessions {
+		t.Fatalf("Start at cap again = %v", err)
+	}
+	_ = s
+	m.CloseAll()
+	waitFor(t, func() bool { return m.liveCount() == 0 })
+}
+
+func TestStartRefusesUnreadableCredsAndBadAddress(t *testing.T) {
+	fr := &fakeRunner{}
+	m := &Manager{run: fr}
+	if _, err := m.Start(t.Context(), &model.Server{IPAddress: "10.0.0.5", IPMIUser: "root", CredentialsUnreadable: true}); err != ErrCredsUnreadable {
+		t.Errorf("unreadable creds: err = %v", err)
+	}
+	if _, err := m.Start(t.Context(), &model.Server{IPAddress: "-oFoo=bar", IPMIUser: "root", IPMIPassword: "p"}); err != ErrBadAddress {
+		t.Errorf("bad address: err = %v", err)
+	}
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if len(fr.allArgs) != 0 {
+		t.Errorf("ipmitool ran: %v", fr.allArgs)
+	}
+}

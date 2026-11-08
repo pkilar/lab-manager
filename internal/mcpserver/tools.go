@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,6 +63,77 @@ type powerResult struct {
 	Message string `json:"message"`
 }
 
+const (
+	// maxConcurrentTools caps tool handlers running at once: each can hold a
+	// BMC call open for up to 30s, and the endpoint is reachable by any holder
+	// of the token.
+	maxConcurrentTools = 4
+	// maxConcurrentCheckAll allows one check_all_power_status run at a time,
+	// since each fans out to many BMCs by itself.
+	maxConcurrentCheckAll = 1
+)
+
+// slotWait is how long a call waits for a free slot before giving up. A var so
+// tests can shorten it.
+var slotWait = 10 * time.Second
+
+// errBusy is the tool error of a call that found no free slot in time.
+var errBusy = errors.New("server busy, try again")
+
+// limiter bounds tool concurrency.
+type limiter struct {
+	all      chan struct{}
+	checkAll chan struct{}
+}
+
+func newLimiter() *limiter {
+	return &limiter{
+		all:      make(chan struct{}, maxConcurrentTools),
+		checkAll: make(chan struct{}, maxConcurrentCheckAll),
+	}
+}
+
+// acquire takes one slot of each given semaphore, in order, within slotWait or
+// until ctx is done. It returns a release func, or errBusy.
+func acquire(ctx context.Context, sems ...chan struct{}) (func(), error) {
+	timer := time.NewTimer(slotWait)
+	defer timer.Stop()
+	var held []chan struct{}
+	release := func() {
+		for _, s := range held {
+			<-s
+		}
+	}
+	for _, s := range sems {
+		select {
+		case s <- struct{}{}:
+			held = append(held, s)
+		case <-timer.C:
+			release()
+			return nil, errBusy
+		case <-ctx.Done():
+			release()
+			return nil, errBusy
+		}
+	}
+	return release, nil
+}
+
+// limit wraps a tool handler so it runs only while holding a slot. extra
+// semaphores (the check-all one) are taken first, so a call queued behind a
+// running check-all does not also hold one of the general slots.
+func limit[In, Out any](l *limiter, h mcp.ToolHandlerFor[In, Out], extra ...chan struct{}) mcp.ToolHandlerFor[In, Out] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		release, err := acquire(ctx, append(slices.Clone(extra), l.all)...)
+		if err != nil {
+			var zero Out
+			return nil, zero, err
+		}
+		defer release()
+		return h(ctx, req, in)
+	}
+}
+
 // handlers binds the tool implementations to the inventory and the BMC layer.
 type handlers struct {
 	st Store
@@ -73,6 +145,7 @@ type handlers struct {
 // surface of this package.
 func registerTools(srv *mcp.Server, st Store, pw Power) {
 	h := &handlers{st: st, pw: pw}
+	lim := newLimiter()
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "list_servers",
@@ -80,7 +153,7 @@ func registerTools(srv *mcp.Server, st Store, pw Power) {
 		Description: "List every server in the lab with its id, name, IP address, BMC type, power-control path and last recorded power status. " +
 			"Reads Lab Manager's database only; no BMC is contacted, so the status may be stale (use check_power_status for a live reading).",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(false)},
-	}, h.listServers)
+	}, limit(lim, h.listServers))
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "check_power_status",
@@ -88,7 +161,7 @@ func registerTools(srv *mcp.Server, st Store, pw Power) {
 		Description: "Query one server's BMC for its live power state and record it. Can take up to about 30 seconds when the BMC is slow or unreachable. " +
 			"If the BMC cannot be read, the last recorded status is returned with live set to false.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
-	}, h.checkPowerStatus)
+	}, limit(lim, h.checkPowerStatus))
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "check_all_power_status",
@@ -96,7 +169,7 @@ func registerTools(srv *mcp.Server, st Store, pw Power) {
 		Description: "Query every server's BMC concurrently for its live power state and record the results. " +
 			"Can take 30 seconds or more when some BMCs are unreachable; a server whose BMC could not be read reports its last recorded status with live set to false.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
-	}, h.checkAllPowerStatus)
+	}, limit(lim, h.checkAllPowerStatus, lim.checkAll))
 
 	for _, p := range []struct {
 		tool    *mcp.Tool
@@ -124,7 +197,7 @@ func registerTools(srv *mcp.Server, st Store, pw Power) {
 			Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true), IdempotentHint: false, OpenWorldHint: new(true)},
 		}, "power cycle"},
 	} {
-		mcp.AddTool(srv, p.tool, h.powerCommand(p.tool.Name, p.command))
+		mcp.AddTool(srv, p.tool, limit(lim, h.powerCommand(p.tool.Name, p.command)))
 	}
 }
 

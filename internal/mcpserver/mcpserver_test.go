@@ -1102,3 +1102,105 @@ func jsonKeys(v any) []string {
 	}
 	return keys
 }
+
+// blockingHook parks every power call until release is closed, counting how
+// many are inside at once.
+type blockingHook struct {
+	inside, peak int
+	mu           sync.Mutex
+	entered      chan struct{}
+	release      chan struct{}
+	once         sync.Once
+}
+
+func (h *blockingHook) open() { h.once.Do(func() { close(h.release) }) }
+
+func newBlockingHook(t *testing.T) *blockingHook {
+	h := &blockingHook{entered: make(chan struct{}, 64), release: make(chan struct{})}
+	// Registered after the server's own cleanup, so it runs first.
+	t.Cleanup(h.open)
+	return h
+}
+
+func (h *blockingHook) hook(ctx context.Context, _ *model.Server) {
+	h.mu.Lock()
+	h.inside++
+	h.peak = max(h.peak, h.inside)
+	h.mu.Unlock()
+	h.entered <- struct{}{}
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+	}
+	h.mu.Lock()
+	h.inside--
+	h.mu.Unlock()
+}
+
+func setSlotWait(t *testing.T, d time.Duration) {
+	old := slotWait
+	slotWait = d
+	t.Cleanup(func() { slotWait = old })
+}
+
+func TestToolConcurrencyCap(t *testing.T) {
+	setSlotWait(t, 300*time.Millisecond)
+	fx := newFixture(t)
+	bh := newBlockingHook(t)
+	fx.pw.setHook(bh.hook)
+	session := fx.connect(t, "")
+
+	var wg sync.WaitGroup
+	for range maxConcurrentTools {
+		wg.Go(func() {
+			_, _ = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "power_on", Arguments: map[string]any{"server_id": 1}})
+		})
+	}
+	for range maxConcurrentTools {
+		waitFor(t, bh.entered, "a call to reach the power layer")
+	}
+	// The cap is full: the next call waits, then is turned away.
+	res := call(t, session, "power_on", map[string]any{"server_id": 1})
+	wantToolError(t, res, "server busy, try again")
+	if got := len(fx.pw.sent()); got != maxConcurrentTools {
+		t.Errorf("Send ran %d times, want %d", got, maxConcurrentTools)
+	}
+	bh.open()
+	wg.Wait()
+	bh.mu.Lock()
+	peak := bh.peak
+	bh.mu.Unlock()
+	if peak > maxConcurrentTools {
+		t.Errorf("peak concurrency %d > %d", peak, maxConcurrentTools)
+	}
+	// Slots are free again.
+	fx.pw.setHook(nil)
+	var out powerResult
+	decode(t, call(t, session, "power_on", map[string]any{"server_id": 1}), &out)
+}
+
+func TestCheckAllRunsOneAtATime(t *testing.T) {
+	setSlotWait(t, 300*time.Millisecond)
+	fx := newFixture(t)
+	bh := newBlockingHook(t)
+	fx.pw.setHook(bh.hook)
+	session := fx.connect(t, "")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "check_all_power_status"})
+	}()
+	waitFor(t, bh.entered, "check_all to start")
+
+	wantToolError(t, call(t, session, "check_all_power_status", nil), "server busy, try again")
+	// Other tools are not held up by the running check-all.
+	var list serverList
+	decode(t, call(t, session, "list_servers", nil), &list)
+
+	bh.mu.Lock()
+	defer bh.mu.Unlock()
+	if bh.peak != 1 {
+		t.Errorf("peak concurrent check-all hook calls = %d, want 1", bh.peak)
+	}
+}

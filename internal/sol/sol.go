@@ -59,6 +59,20 @@ func solArgs(ip, user, verb string, instance int) []string {
 // ErrNoCreds is returned by Start when the server has no usable credentials.
 var ErrNoCreds = errors.New("no IPMI or Redfish credentials configured")
 
+// ErrCredsUnreadable is returned by Start when the stored password could not be
+// decrypted (the encryption key changed); ciphertext must not be sent to a BMC
+// as a password.
+var ErrCredsUnreadable = errors.New("stored BMC credentials can't be decrypted (the encryption key changed); re-enter the password on the edit page")
+
+// ErrBadAddress is returned by Start when the stored address is not an IP.
+var ErrBadAddress = errors.New("server address is not a valid IP address")
+
+// ErrTooManySessions is returned by Start at the session cap.
+var ErrTooManySessions = errors.New("too many serial console sessions open")
+
+// maxSessions caps live sessions, each of which holds an ipmitool process.
+const maxSessions = 16
+
 // runner abstracts process execution so the bridge logic is testable without a
 // real ipmitool/BMC. stdin may be nil (no input); stdout receives merged
 // stdout+stderr.
@@ -126,6 +140,12 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 	if !ok {
 		return nil, ErrNoCreds
 	}
+	if s.CredentialsUnreadable {
+		return nil, ErrCredsUnreadable
+	}
+	if !s.ValidIP() {
+		return nil, ErrBadAddress
+	}
 	instance := s.SOLInstanceOrDefault()
 	ctx, cancel := context.WithCancel(ctx)
 	inR, inW := io.Pipe()
@@ -137,9 +157,11 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 		cancel: cancel, stdinW: inW, outR: outR, done: make(chan struct{}),
 	}
 
-	m.track(sess)
+	if !m.track(sess) {
+		cancel()
+		return nil, ErrTooManySessions
+	}
 	go func() {
-		defer m.untrack(sess)
 		// Clear a possibly-leaked prior payload (single-session per BMC).
 		_ = m.run.Run(ctx, deactivateArgs(s.IPAddress, user, instance), env, nil, io.Discard)
 		// Run the console until ctx is cancelled or ipmitool exits. The exit
@@ -155,6 +177,9 @@ func (m *Manager) Start(ctx context.Context, s *model.Server) (*Session, error) 
 		// Also close stdin: if ipmitool exited on its own (no Close() yet), this
 		// makes a pending browser write fail instead of blocking forever.
 		_ = inW.Close()
+		// Free the slot before signalling done, so it is released exactly once
+		// and a returned Close implies it is free.
+		m.untrack(sess)
 		close(sess.done)
 	}()
 
@@ -175,13 +200,18 @@ func childEnv(pass string) []string {
 	return append(env, "IPMI_PASSWORD="+pass)
 }
 
-func (m *Manager) track(s *Session) {
+// track registers s, or reports false when maxSessions are already live.
+func (m *Manager) track(s *Session) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if len(m.live) >= maxSessions {
+		return false
+	}
 	if m.live == nil {
 		m.live = make(map[*Session]struct{})
 	}
 	m.live[s] = struct{}{}
+	return true
 }
 
 func (m *Manager) untrack(s *Session) {

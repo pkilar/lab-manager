@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/pkilar/lab-manager/internal/model"
@@ -41,6 +43,58 @@ var bmcHTTPClient = &http.Client{
 	// A BMC API call never legitimately redirects; following one would replay credentials elsewhere.
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
+
+// bmcHost returns the URL host for a server's BMC. A var so tests can point it
+// at an httptest listener (whose address carries a port).
+var bmcHost = (*model.Server).BMCHost
+
+// errBadAddress is returned when the stored address is not an IP, so no URL is
+// built from it and nothing is dialed.
+const errBadAddress = "Server address is not a valid IP address"
+
+// errCredsUnreadable is returned instead of contacting a BMC with credentials
+// that could not be decrypted: sending ciphertext as a password only racks up
+// failed logins and can lock the BMC account.
+const errCredsUnreadable = "Stored BMC credentials can't be decrypted (the encryption key changed). Re-enter the password on the edit page." //nolint:gosec // G101: a message, not a credential
+
+// maxBMCText caps BMC-supplied text copied into messages.
+const maxBMCText = 200
+
+// bmcText makes text from a BMC safe to show: control characters are dropped
+// and the result is cut to maxBMCText bytes on a rune boundary.
+func bmcText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.ToValidUTF8(strings.TrimSpace(s), "")
+	if len(s) <= maxBMCText {
+		return s
+	}
+	cut := maxBMCText
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// maxOutputBytes caps how much of ipmitool's stdout or stderr is kept.
+const maxOutputBytes = 64 << 10
+
+// cappedBuffer keeps the first maxOutputBytes written and silently discards the
+// rest while reporting full success, so ipmitool never sees a short write.
+type cappedBuffer struct{ buf bytes.Buffer }
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := maxOutputBytes - b.buf.Len(); room > 0 {
+		b.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string { return b.buf.String() }
 
 // Controller sends power commands and persists the resulting status.
 type Controller struct {
@@ -101,7 +155,11 @@ func ProtocolFor(s *model.Server) Protocol {
 // Send runs command through the one protocol ProtocolFor selects for s. The
 // context bounds the underlying network/exec call.
 func (c *Controller) Send(ctx context.Context, s *model.Server, command string) (bool, string) {
-	switch ProtocolFor(s) {
+	proto := ProtocolFor(s)
+	if s.CredentialsUnreadable && proto != ProtocolWoL && proto != ProtocolNone {
+		return false, errCredsUnreadable
+	}
+	switch proto {
 	case ProtocolPiKVM:
 		return c.pikvmCommand(ctx, s, command)
 	case ProtocolRedfish:
@@ -136,8 +194,6 @@ func (c *Controller) Send(ctx context.Context, s *model.Server, command string) 
 
 // redfishCommand sends a Dell-style Redfish ComputerSystem.Reset action.
 func (c *Controller) redfishCommand(ctx context.Context, s *model.Server, command string) (bool, string) {
-	resetURL := "https://" + s.IPAddress + "/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset"
-
 	var resetType, okStatus, okMessage string
 	switch command {
 	case "power on":
@@ -149,6 +205,12 @@ func (c *Controller) redfishCommand(ctx context.Context, s *model.Server, comman
 	default:
 		return false, "Command not implemented"
 	}
+
+	host, ok := bmcHost(s)
+	if !ok {
+		return false, errBadAddress
+	}
+	resetURL := "https://" + host + "/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset"
 
 	reqCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
 	defer cancel()
@@ -195,7 +257,11 @@ func pikvmCreds(s *model.Server) (user, pass string) {
 // pikvmRequest builds a kvmd API request authenticated statelessly with the
 // X-KVMD-User/X-KVMD-Passwd headers (no session is created).
 func pikvmRequest(ctx context.Context, s *model.Server, method, path string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, "https://"+s.IPAddress+path, nil)
+	host, ok := bmcHost(s)
+	if !ok {
+		return nil, errors.New(errBadAddress) //nolint:staticcheck // ST1005: user-facing message, shown verbatim
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "https://"+host+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +321,7 @@ func (c *Controller) pikvmCommand(ctx context.Context, s *model.Server, command 
 			}
 			detail += e.Result.ErrorMsg
 		}
-		return false, fmt.Sprintf("%s: %s (HTTP %d)", failPrefix, detail, resp.StatusCode)
+		return false, fmt.Sprintf("%s: %s (HTTP %d)", failPrefix, bmcText(detail), resp.StatusCode)
 	}
 	return false, fmt.Sprintf("%s: HTTP %d", failPrefix, resp.StatusCode)
 }
@@ -274,7 +340,7 @@ var pikvmVideoWindow = 5 * time.Second
 // Off. Any failure, missing credentials, or an undetermined video state yields
 // the cached status.
 func (c *Controller) checkStatusPiKVM(ctx context.Context, s *model.Server) string {
-	if user, _ := pikvmCreds(s); user == "" {
+	if user, _ := pikvmCreds(s); user == "" || s.CredentialsUnreadable {
 		return s.Status
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
@@ -335,12 +401,16 @@ func pikvmVideoSignal(ctx context.Context, s *model.Server) (online, known bool)
 	hdr := http.Header{}
 	hdr.Set("X-KVMD-User", user)
 	hdr.Set("X-KVMD-Passwd", pass)
+	host, ok := bmcHost(s)
+	if !ok {
+		return false, false
+	}
 	d := websocket.Dialer{
 		// BMCs ship self-signed certs, as with bmcHTTPClient.
 		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // self-signed BMC certificate
 		HandshakeTimeout: 10 * time.Second,
 	}
-	conn, resp, err := d.DialContext(ctx, "wss://"+s.IPAddress+"/api/ws?stream=1", hdr)
+	conn, resp, err := d.DialContext(ctx, "wss://"+host+"/api/ws?stream=1", hdr)
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
@@ -405,10 +475,13 @@ func ipmiEnv(s *model.Server) []string {
 
 // ipmiCommand runs `ipmitool ... <command>` over LAN.
 func (c *Controller) ipmiCommand(ctx context.Context, s *model.Server, command string) (bool, string) {
+	if !s.ValidIP() {
+		return false, errBadAddress
+	}
 	cmdCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
 	defer cancel()
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr cappedBuffer
 	cmd := exec.CommandContext(cmdCtx, "ipmitool", ipmiArgs(s, strings.Fields(command)...)...)
 	cmd.Env = ipmiEnv(s)
 	cmd.Stdout = &stdout
@@ -419,9 +492,9 @@ func (c *Controller) ipmiCommand(ctx context.Context, s *model.Server, command s
 		// The Go error text is reserved for the case where the process never
 		// ran (binary missing / timeout).
 		if _, ok := errors.AsType[*exec.ExitError](err); ok {
-			return false, stderr.String()
+			return false, bmcText(stderr.String())
 		}
-		return false, err.Error()
+		return false, bmcText(err.Error())
 	}
 
 	// Update the cached status from the command keyword ("on" is checked first).
@@ -435,7 +508,7 @@ func (c *Controller) ipmiCommand(ctx context.Context, s *model.Server, command s
 	default:
 		c.touchStatus(s, s.Status)
 	}
-	return true, stdout.String()
+	return true, bmcText(stdout.String())
 }
 
 // wolCommand sends Wake-on-LAN magic packets. Gated behind WOL_ENABLED. The
@@ -532,7 +605,12 @@ func sendMagicPacket(packet []byte, ip string, port int) error {
 // CheckStatus queries the live power state, persists it, and returns it. On any
 // error it returns the last-known cached status.
 func (c *Controller) CheckStatus(ctx context.Context, s *model.Server) string {
-	switch ProtocolFor(s) {
+	proto := ProtocolFor(s)
+	if s.CredentialsUnreadable && proto != ProtocolWoL && proto != ProtocolNone {
+		// Cached, and LastUpdated untouched: callers infer "live" from it.
+		return s.Status
+	}
+	switch proto {
 	case ProtocolPiKVM:
 		return c.checkStatusPiKVM(ctx, s)
 	case ProtocolRedfish:
@@ -568,10 +646,14 @@ func (c *Controller) CheckAll(ctx context.Context, servers []*model.Server) {
 }
 
 func (c *Controller) checkStatusRedfish(ctx context.Context, s *model.Server) string {
+	host, ok := bmcHost(s)
+	if !ok {
+		return s.Status
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://"+s.IPAddress+"/redfish/v1/Systems/System.Embedded.1/", nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://"+host+"/redfish/v1/Systems/System.Embedded.1/", nil)
 	if err != nil {
 		return s.Status
 	}
@@ -588,8 +670,11 @@ func (c *Controller) checkStatusRedfish(ctx context.Context, s *model.Server) st
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data); err != nil {
 		return s.Status
 	}
+	// The BMC's string is stored and shown verbatim, so only known values pass.
 	state, _ := data["PowerState"].(string)
-	if state == "" {
+	switch state {
+	case "On", "Off", "PoweringOn", "PoweringOff", "Paused":
+	default:
 		state = "Unknown"
 	}
 	c.touchStatus(s, state)
@@ -597,10 +682,13 @@ func (c *Controller) checkStatusRedfish(ctx context.Context, s *model.Server) st
 }
 
 func (c *Controller) checkStatusIPMI(ctx context.Context, s *model.Server) string {
+	if !s.ValidIP() {
+		return s.Status
+	}
 	cmdCtx, cancel := context.WithTimeout(ctx, bmcTimeout)
 	defer cancel()
 
-	var stdout bytes.Buffer
+	var stdout cappedBuffer
 	cmd := exec.CommandContext(cmdCtx, "ipmitool", ipmiArgs(s, "power", "status")...)
 	cmd.Env = ipmiEnv(s)
 	cmd.Stdout = &stdout

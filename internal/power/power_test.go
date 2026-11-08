@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/pkilar/lab-manager/internal/model"
@@ -185,6 +186,7 @@ func addRedfishBMC(t *testing.T, st *store.Store, name string, handler http.Hand
 	t.Helper()
 	srv := httptest.NewTLSServer(handler)
 	t.Cleanup(srv.Close)
+	allowTestHost(t)
 	s := &model.Server{
 		Name: name, IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCIDRAC,
 		RedfishUser: "root", RedfishPassword: "calvin", Status: "Unknown",
@@ -369,6 +371,7 @@ func newPiKVM(t *testing.T, redfishUser, ipmiUser string, h func(w http.Response
 		h(w, r)
 	}))
 	t.Cleanup(srv.Close)
+	allowTestHost(t)
 	c, st := newWoLController(t, nil)
 	s := &model.Server{
 		Name: "pikvm", IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCPiKVM, Status: "Unknown",
@@ -571,6 +574,7 @@ func newPiKVMVideo(t *testing.T, f *pikvmVideoFixture) (*Controller, *model.Serv
 		}
 	}))
 	t.Cleanup(srv.Close)
+	allowTestHost(t)
 	c, st := newWoLController(t, nil)
 	s := &model.Server{
 		Name: "pikvm", IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCPiKVM, Status: "Unknown",
@@ -672,7 +676,7 @@ func TestSendIPMICommandMapping(t *testing.T) {
 		t.Run(tc.command, func(t *testing.T) {
 			s := newIPMIServer()
 			ok, msg := c.Send(t.Context(), s, tc.command)
-			want := strings.Join(ipmiArgs(s, strings.Fields(tc.ipmi)...), " ") + "\n"
+			want := strings.Join(ipmiArgs(s, strings.Fields(tc.ipmi)...), " ")
 			if !ok || msg != want {
 				t.Errorf("Send = %v, %q; want true, %q", ok, msg, want)
 			}
@@ -814,5 +818,120 @@ func TestCheckAll(t *testing.T) {
 		if stamped, wantStamped := !s.LastUpdated.IsZero(), s != idle; stamped != wantStamped {
 			t.Errorf("%s: LastUpdated set = %v, want %v", s.Name, stamped, wantStamped)
 		}
+	}
+}
+
+// allowTestHost lets the BMC URL builders take an httptest "host:port" address,
+// which BMCHost (IP literals only) rightly refuses.
+func allowTestHost(t *testing.T) {
+	t.Helper()
+	old := bmcHost
+	bmcHost = func(s *model.Server) (string, bool) { return s.IPAddress, true }
+	t.Cleanup(func() { bmcHost = old })
+}
+
+func TestBMCTextTruncatesAndStrips(t *testing.T) {
+	long := strings.Repeat("é", 150) // 300 bytes
+	got := bmcText("a\x00b\x1b[31m\nc" + long)
+	if len(got) > maxBMCText || !utf8.ValidString(got) {
+		t.Errorf("len=%d valid=%v", len(got), utf8.ValidString(got))
+	}
+	if strings.ContainsAny(got, "\x00\x1b\n") || !strings.HasPrefix(got, "ab[31mc") {
+		t.Errorf("control chars survived: %q", got)
+	}
+}
+
+func TestCappedBufferDiscardsExcessWithoutError(t *testing.T) {
+	var b cappedBuffer
+	chunk := bytes.Repeat([]byte("x"), 40<<10)
+	for range 3 {
+		if n, err := b.Write(chunk); n != len(chunk) || err != nil {
+			t.Fatalf("Write = %d, %v; want full success", n, err)
+		}
+	}
+	if len(b.String()) != maxOutputBytes {
+		t.Errorf("kept %d bytes, want %d", len(b.String()), maxOutputBytes)
+	}
+}
+
+func TestPiKVMErrorTextIsSanitized(t *testing.T) {
+	c, s, _ := newPiKVM(t, "admin", "", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"result":{"error":"E","error_msg":"` + strings.Repeat("z", 5000) + `\u001b[2J"}}`))
+	})
+	ok, msg := c.Send(t.Context(), s, "power on")
+	if ok || len(msg) > 300 || strings.ContainsRune(msg, 0x1b) {
+		t.Errorf("Send = %v, %d bytes %q", ok, len(msg), msg)
+	}
+}
+
+func TestRedfishPowerStateWhitelist(t *testing.T) {
+	for state, want := range map[string]string{
+		"On": "On", "Off": "Off", "PoweringOn": "PoweringOn", "PoweringOff": "PoweringOff", "Paused": "Paused",
+		"<script>x</script>": "Unknown", "on": "Unknown", "": "Unknown",
+	} {
+		c, s, _ := redfishFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+			b, _ := json.Marshal(map[string]string{"PowerState": state})
+			_, _ = w.Write(b)
+		})
+		if got := c.CheckStatus(t.Context(), s); got != want {
+			t.Errorf("PowerState %q -> %q, want %q", state, got, want)
+		}
+	}
+}
+
+func TestInvalidAddressNoNetwork(t *testing.T) {
+	// No allowTestHost: the real BMCHost applies. A host:port value is not an IP.
+	hit := false
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit = true }))
+	t.Cleanup(srv.Close)
+	c, st := newWoLController(t, nil)
+	for _, s := range []*model.Server{
+		{Name: "rf", IPAddress: strings.TrimPrefix(srv.URL, "https://"), RedfishUser: "r", RedfishPassword: "p", Status: "Off"},
+		{Name: "pk", IPAddress: strings.TrimPrefix(srv.URL, "https://"), BMCType: model.BMCPiKVM, RedfishUser: "r", RedfishPassword: "p", Status: "Off"},
+		{Name: "ip", IPAddress: "-oProxyCommand=x", IPMIUser: "u", IPMIPassword: "p", Status: "Off"},
+	} {
+		if err := st.CreateServer(s); err != nil {
+			t.Fatal(err)
+		}
+		if ok, msg := c.Send(t.Context(), s, "power on"); ok || msg != errBadAddress {
+			t.Errorf("%s Send = %v, %q", s.Name, ok, msg)
+		}
+		if got := c.CheckStatus(t.Context(), s); got != "Off" {
+			t.Errorf("%s CheckStatus = %q, want cached Off", s.Name, got)
+		}
+	}
+	if hit {
+		t.Error("an invalid address reached the network")
+	}
+}
+
+func TestBMCHostBracketsIPv6(t *testing.T) {
+	if h, ok := (&model.Server{IPAddress: "::1"}).BMCHost(); !ok || h != "[::1]" {
+		t.Errorf("BMCHost = %q, %v", h, ok)
+	}
+}
+
+func TestUnreadableCredentialsNoContact(t *testing.T) {
+	hit := false
+	c, s, _ := newPiKVM(t, "admin", "", func(w http.ResponseWriter, _ *http.Request) { hit = true; okJSON(w, nil) })
+	rf, rs, _ := redfishFixture(t, func(w http.ResponseWriter, _ *http.Request) { hit = true })
+	ip := &model.Server{Name: "i", IPAddress: "192.0.2.1", IPMIUser: "u", Status: "Off"}
+	for _, tc := range []struct {
+		c *Controller
+		s *model.Server
+	}{{c, s}, {rf, rs}, {c, ip}} {
+		tc.s.CredentialsUnreadable = true
+		tc.s.Status = "Off"
+		tc.s.LastUpdated = time.Time{}
+		if ok, msg := tc.c.Send(t.Context(), tc.s, "power on"); ok || !strings.Contains(msg, "can't be decrypted") {
+			t.Errorf("%s Send = %v, %q", tc.s.Name, ok, msg)
+		}
+		if got := tc.c.CheckStatus(t.Context(), tc.s); got != "Off" || !tc.s.LastUpdated.IsZero() {
+			t.Errorf("%s CheckStatus = %q, LastUpdated %v", tc.s.Name, got, tc.s.LastUpdated)
+		}
+	}
+	if hit {
+		t.Error("BMC contacted with unreadable credentials")
 	}
 }
