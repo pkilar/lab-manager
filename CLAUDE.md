@@ -11,7 +11,7 @@ The routes, on-disk SQLite schema, Fernet-encrypted credentials, and scrypt pass
 ## Development Commands
 
 ```bash
-# Build / run / test (Go 1.27.3+)
+# Build / run / test (Go 1.27.4+)
 go build -o lab-manager ./cmd/lab-manager   # Build the binary
 go run ./cmd/lab-manager                     # Run locally (listens on :5000)
 go test ./...                                # Run the test suite
